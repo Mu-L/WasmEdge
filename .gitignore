@@ -48,6 +48,9 @@ autoconf/autom4te.cache
 # (Rust) Cargo lockfile, not published with libraries.
 Cargo.lock
 bindings/rust/target
+bindings/rust/wasmedge-sdk/target
+bindings/rust/wasmedge-sys/target
+bindings/rust/wasmedge-sdk/examples/wasi_print_env/target
 
 #==============================================================================#
 # Directories to ignore (do not add trailing '/'s, they skip symlinks).
@@ -69,3 +72,26 @@ docs/_build
 
 .direnv
 .envrc
+
+# mdbook build
+docs/book/*/book
+
+bindings/rust/wasmedge-sys/examples/.ipynb_checkpoints/*
+.DS_Store
+
+node_modules/
+
+# intelliJ IDEA
+**/.idea/*
+**.iml
+## Gradle
+**/.gradle/*
+**/build
+
+# cmake caches
+**/cmake-build-debug
+**/cmake-build-debug-remote-host
+**/cmake-build-release
+
+# generated jni files
+bindings/java/wasmedge-java/wasmedge-jni/jni/*.h

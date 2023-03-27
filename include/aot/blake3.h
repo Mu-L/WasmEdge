@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/aot/blake3.h - Blake3 hash class definition --------------===//
 //
 // Part of the WasmEdge Project.
@@ -15,8 +17,6 @@
 #include "common/types.h"
 
 #include <blake3.h>
-#include <cstdint>
-#include <string_view>
 
 namespace WasmEdge {
 namespace AOT {

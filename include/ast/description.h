@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/ast/description.h - Desc classes definitions -------------===//
 //
 // Part of the WasmEdge Project.
@@ -13,7 +15,7 @@
 #pragma once
 
 #include "ast/type.h"
-#include "common/enum_types.h"
+#include "common/enum_types.hpp"
 
 #include <string>
 #include <string_view>
@@ -62,7 +64,6 @@ private:
   /// \name Data of ImportDesc: Module name, External name, and content node.
   /// @{
   std::string ModName;
-  std::string ExtName;
   uint32_t FuncTypeIdx = 0;
   TableType TabType;
   MemoryType MemType;

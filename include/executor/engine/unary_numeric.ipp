@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
 
 #include "common/roundeven.h"
 #include "executor/executor.h"
@@ -10,7 +11,7 @@ namespace Executor {
 
 template <typename T> TypeU<T> Executor::runClzOp(ValVariant &Val) const {
   T I = Val.get<T>();
-  /// Return the count of leading zero bits in i.
+  // Return the count of leading zero bits in i.
   if (I != 0U) {
     T Cnt = 0;
     T Mask = static_cast<T>(0x1U) << (sizeof(T) * 8 - 1);
@@ -27,7 +28,7 @@ template <typename T> TypeU<T> Executor::runClzOp(ValVariant &Val) const {
 
 template <typename T> TypeU<T> Executor::runCtzOp(ValVariant &Val) const {
   T I = Val.get<T>();
-  /// Return the count of trailing zero bits in i.
+  // Return the count of trailing zero bits in i.
   if (I != 0U) {
     T Cnt = 0;
     T Mask = static_cast<T>(0x1U);
@@ -44,7 +45,7 @@ template <typename T> TypeU<T> Executor::runCtzOp(ValVariant &Val) const {
 
 template <typename T> TypeU<T> Executor::runPopcntOp(ValVariant &Val) const {
   T I = Val.get<T>();
-  /// Return the count of non-zero bits in i.
+  // Return the count of non-zero bits in i.
   if (I != 0U) {
     T Cnt = 0;
     T Mask = static_cast<T>(0x1U);
@@ -96,7 +97,7 @@ template <typename T> TypeF<T> Executor::runSqrtOp(ValVariant &Val) const {
 
 template <typename TIn, typename TOut>
 Expect<void> Executor::runExtractLaneOp(ValVariant &Val,
-                                        const uint32_t Index) const {
+                                        const uint8_t Index) const {
   using VTIn [[gnu::vector_size(16)]] = TIn;
   const TOut Result = Val.get<VTIn>()[Index];
   Val.emplace<TOut>(Result);

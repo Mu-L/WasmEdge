@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/int128.h - WasmEdge C API --------------------------------===//
 //
 // Part of the WasmEdge Project.
@@ -13,7 +15,8 @@
 #ifndef WASMEDGE_C_API_INT128_H
 #define WASMEDGE_C_API_INT128_H
 
-#if defined(__x86_64__) || defined(__aarch64__)
+#if defined(__x86_64__) || defined(__aarch64__) ||                             \
+    (defined(__riscv) && __riscv_xlen == 64)
 typedef unsigned __int128 uint128_t;
 typedef __int128 int128_t;
 #else

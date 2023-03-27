@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
 
 #include "common/errinfo.h"
 
@@ -194,9 +195,6 @@ std::ostream &operator<<(std::ostream &OS, const struct InfoInstruction &Rhs) {
     OS << " , Args: [";
     for (uint32_t I = 0; I < Rhs.Args.size(); ++I) {
       switch (Rhs.ArgsTypes[I]) {
-      case ValType::None:
-        OS << "none";
-        break;
       case ValType::I32:
         if (Rhs.IsSigned) {
           OS << Rhs.Args[I].get<int32_t>();
@@ -227,7 +225,7 @@ std::ostream &operator<<(std::ostream &OS, const struct InfoInstruction &Rhs) {
         if (isNullRef(Rhs.Args[I])) {
           OS << ":null";
         } else {
-          OS << ":" << retrieveFuncIdx(Rhs.Args[I]);
+          OS << ":" << &Rhs.Args[I].get<uint64_t>();
         }
         break;
       case ValType::ExternRef:

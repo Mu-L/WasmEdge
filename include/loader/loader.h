@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/loader/loader.h - Loader flow control class definition ---===//
 //
 // Part of the WasmEdge Project.
@@ -19,7 +21,10 @@
 #include "loader/filemgr.h"
 #include "loader/ldmgr.h"
 
-#include <string>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <vector>
 
 namespace WasmEdge {
@@ -79,7 +84,8 @@ public:
   ~Loader() noexcept = default;
 
   /// Load data from file path.
-  Expect<std::vector<Byte>> loadFile(const std::filesystem::path &FilePath);
+  static Expect<std::vector<Byte>>
+  loadFile(const std::filesystem::path &FilePath);
 
   /// Parse module from file path.
   Expect<std::unique_ptr<AST::Module>>
@@ -91,14 +97,15 @@ public:
 private:
   /// \name Helper functions to print error log when loading AST nodes
   /// @{
-  inline auto logLoadError(ErrCode Code, uint64_t Off, ASTNodeAttr Node) {
+  inline auto logLoadError(ErrCode Code, uint64_t Off,
+                           ASTNodeAttr Node) const noexcept {
     spdlog::error(Code);
     spdlog::error(ErrInfo::InfoLoading(Off));
     spdlog::error(ErrInfo::InfoAST(Node));
     return Unexpect(Code);
   }
   inline auto logNeedProposal(ErrCode Code, Proposal Prop, uint64_t Off,
-                              ASTNodeAttr Node) {
+                              ASTNodeAttr Node) const noexcept {
     spdlog::error(Code);
     spdlog::error(ErrInfo::InfoProposal(Prop));
     spdlog::error(ErrInfo::InfoLoading(Off));
@@ -106,10 +113,10 @@ private:
     return Unexpect(Code);
   }
   Expect<ValType> checkValTypeProposals(ValType VType, uint64_t Off,
-                                        ASTNodeAttr Node);
+                                        ASTNodeAttr Node) const noexcept;
   Expect<RefType> checkRefTypeProposals(RefType RType, uint64_t Off,
-                                        ASTNodeAttr Node);
-  Expect<void> checkInstrProposals(OpCode Code, uint64_t Offset);
+                                        ASTNodeAttr Node) const noexcept;
+  Expect<void> checkInstrProposals(OpCode Code, uint64_t Offset) const noexcept;
   /// @}
 
   /// \name Load AST Module functions
@@ -123,21 +130,19 @@ private:
   Expect<uint32_t> loadSectionSize(ASTNodeAttr Node);
   template <typename T, typename L>
   Expect<void> loadSectionContent(T &Sec, L &&Func) {
+    Sec.setStartOffset(FMgr.getOffset());
     if (auto Res = loadSectionSize(NodeAttrFromAST<T>())) {
-      /// Set the section size.
+      // Set the section size.
       Sec.setContentSize(*Res);
       auto StartOffset = FMgr.getOffset();
-      /// Bound the expected section size in file manager and load content.
-      FMgr.setSectionSize(*Res);
       auto ResContent = Func();
-      FMgr.unsetSectionSize();
       if (!ResContent) {
         return Unexpect(ResContent);
       }
-      /// Check the read size match the section size.
+      // Check the read size match the section size.
       auto EndOffset = FMgr.getOffset();
       if (EndOffset - StartOffset != Sec.getContentSize()) {
-        return logLoadError(ErrCode::SectionSizeMismatch, EndOffset,
+        return logLoadError(ErrCode::Value::SectionSizeMismatch, EndOffset,
                             NodeAttrFromAST<T>());
       }
     } else {
@@ -148,16 +153,20 @@ private:
   template <typename T, typename L>
   Expect<void> loadSectionContentVec(T &Sec, L &&Func) {
     uint32_t VecCnt = 0;
-    /// Read vector size.
+    // Read the vector size.
     if (auto Res = FMgr.readU32()) {
       VecCnt = *Res;
+      if (VecCnt / 2 > FMgr.getRemainSize()) {
+        return logLoadError(ErrCode::Value::IntegerTooLong,
+                            FMgr.getLastOffset(), NodeAttrFromAST<T>());
+      }
       Sec.getContent().resize(VecCnt);
     } else {
       return logLoadError(Res.error(), FMgr.getLastOffset(),
                           NodeAttrFromAST<T>());
     }
 
-    /// Sequently create AST node T and read data.
+    // Sequently create the AST node T and read data.
     for (uint32_t I = 0; I < VecCnt; ++I) {
       if (auto Res = Func(Sec.getContent()[I]); !Res) {
         spdlog::error(ErrInfo::InfoAST(NodeAttrFromAST<T>()));
@@ -182,7 +191,7 @@ private:
   Expect<void> loadSection(AST::CodeSection &Sec);
   Expect<void> loadSection(AST::DataSection &Sec);
   Expect<void> loadSection(AST::DataCountSection &Sec);
-  Expect<void> loadSection(AST::AOTSection &Sec);
+  static Expect<void> loadSection(FileMgr &VecMgr, AST::AOTSection &Sec);
   Expect<void> loadSegment(AST::GlobalSegment &GlobSeg);
   Expect<void> loadSegment(AST::ElementSegment &ElemSeg);
   Expect<void> loadSegment(AST::CodeSegment &CodeSeg);
@@ -194,9 +203,10 @@ private:
   Expect<void> loadType(AST::MemoryType &MemType);
   Expect<void> loadType(AST::TableType &TabType);
   Expect<void> loadType(AST::GlobalType &GlobType);
-  Expect<void> loadExpression(AST::Expression &Expr);
+  Expect<void> loadExpression(AST::Expression &Expr,
+                              std::optional<uint64_t> SizeBound = std::nullopt);
   Expect<OpCode> loadOpCode();
-  Expect<AST::InstrVec> loadInstrSeq();
+  Expect<AST::InstrVec> loadInstrSeq(std::optional<uint64_t> SizeBound);
   Expect<void> loadInstruction(AST::Instruction &Instr);
   /// @}
 
@@ -206,7 +216,12 @@ private:
   FileMgr FMgr;
   LDMgr LMgr;
   const AST::Module::IntrinsicsTable *IntrinsicsTable;
+  std::recursive_mutex Mutex;
   bool HasDataSection;
+
+  /// Input data type enumeration.
+  enum class InputType : uint8_t { WASM, UniversalWASM, SharedLibrary };
+  InputType WASMType = InputType::WASM;
   /// @}
 };
 

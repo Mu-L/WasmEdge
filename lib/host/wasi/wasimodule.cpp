@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 #include "host/wasi/wasimodule.h"
 #include "host/wasi/wasifunc.h"
+
 #include <memory>
 
 namespace WasmEdge {
 namespace Host {
 
-WasiModule::WasiModule() : ImportObject("wasi_snapshot_preview1") {
+WasiModule::WasiModule() : ModuleInstance("wasi_snapshot_preview1") {
   addHostFunc("args_get", std::make_unique<WasiArgsGet>(Env));
   addHostFunc("args_sizes_get", std::make_unique<WasiArgsSizesGet>(Env));
   addHostFunc("environ_get", std::make_unique<WasiEnvironGet>(Env));
@@ -53,6 +56,7 @@ WasiModule::WasiModule() : ImportObject("wasi_snapshot_preview1") {
   addHostFunc("path_symlink", std::make_unique<WasiPathSymlink>(Env));
   addHostFunc("path_unlink_file", std::make_unique<WasiPathUnlinkFile>(Env));
   addHostFunc("poll_oneoff", std::make_unique<WasiPollOneoff>(Env));
+  addHostFunc("epoll_oneoff", std::make_unique<WasiEpollOneoff>(Env));
   addHostFunc("proc_exit", std::make_unique<WasiProcExit>(Env));
   addHostFunc("proc_raise", std::make_unique<WasiProcRaise>(Env));
   addHostFunc("sched_yield", std::make_unique<WasiSchedYield>(Env));
@@ -63,8 +67,15 @@ WasiModule::WasiModule() : ImportObject("wasi_snapshot_preview1") {
   addHostFunc("sock_listen", std::make_unique<WasiSockListen>(Env));
   addHostFunc("sock_accept", std::make_unique<WasiSockAccept>(Env));
   addHostFunc("sock_recv", std::make_unique<WasiSockRecv>(Env));
+  addHostFunc("sock_recv_from", std::make_unique<WasiSockRecvFrom>(Env));
   addHostFunc("sock_send", std::make_unique<WasiSockSend>(Env));
+  addHostFunc("sock_send_to", std::make_unique<WasiSockSendTo>(Env));
   addHostFunc("sock_shutdown", std::make_unique<WasiSockShutdown>(Env));
+  addHostFunc("sock_getsockopt", std::make_unique<WasiSockGetOpt>(Env));
+  addHostFunc("sock_setsockopt", std::make_unique<WasiSockSetOpt>(Env));
+  addHostFunc("sock_getlocaladdr", std::make_unique<WasiSockGetLocalAddr>(Env));
+  addHostFunc("sock_getpeeraddr", std::make_unique<WasiSockGetPeerAddr>(Env));
+  addHostFunc("sock_getaddrinfo", std::make_unique<WasiGetAddrinfo>(Env));
 }
 
 } // namespace Host

@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/test/spec/spectest.cpp - Wasm test suites ----------------===//
 //
 // Part of the WasmEdge Project.
@@ -22,44 +24,55 @@
 #endif
 
 #include "spectest.h"
-
 #include "common/log.h"
-#include "rapidjson/document.h"
-#include "rapidjson/istreamwrapper.h"
-#include "gtest/gtest.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <fstream>
+#include <gtest/gtest.h>
+#include <iterator>
+#include <map>
+#include <memory>
+#include <rapidjson/document.h>
+#include <rapidjson/istreamwrapper.h>
+#include <unordered_map>
 
 namespace {
 
 using namespace std::literals;
 using namespace WasmEdge;
 
-/// Preprocessing for set up aliasing.
+// Preprocessing for set up aliasing.
 void resolveRegister(std::map<std::string, std::string> &Alias,
                      rapidjson::Value &CmdArray,
                      rapidjson::Document::AllocatorType &Allocator) {
-  rapidjson::Value::ValueIterator ItMod;
+  rapidjson::Value::ValueIterator ItMod = CmdArray.Begin();
   for (rapidjson::Value::ValueIterator It = CmdArray.Begin();
        It != CmdArray.End(); ++It) {
     const auto CmdType = It->GetObject()["type"].Get<std::string>();
     if (CmdType == "module"sv) {
-      /// Record last module in order.
+      // Record last module in order.
       ItMod = It;
     } else if (CmdType == "register"sv) {
-      const auto NewName = It->GetObject()["as"].Get<std::string>();
+      const auto NewNameStr = It->GetObject()["as"].Get<std::string>();
+      auto OrgName = ItMod->FindMember("name");
       if (It->GetObject().HasMember("name")) {
-        /// Set aliasing.
-        Alias.emplace(It->GetObject()["name"].Get<std::string>(), NewName);
+        // Register command records the original name. Set aliasing.
+        Alias.emplace(It->GetObject()["name"].Get<std::string>(), NewNameStr);
+      } else if (OrgName != ItMod->MemberEnd()) {
+        // Register command not records the original name. Get name from the
+        // module.
+        Alias.emplace(OrgName->value.Get<std::string>(), NewNameStr);
       }
-      if (auto Name = ItMod->FindMember("name"); Name != ItMod->MemberEnd()) {
-        /// Module has origin name. Replace to aliased one.
-        Name->value.SetString(NewName, Allocator);
+      if (OrgName != ItMod->MemberEnd()) {
+        // Module has origin name. Replace to aliased one.
+        OrgName->value.SetString(NewNameStr, Allocator);
       } else {
-        /// Module has no origin name. Add the aliased one.
+        // Module has no origin name. Add the aliased one.
         rapidjson::Value Text;
-        Text.SetString(NewName, Allocator);
+        Text.SetString(NewNameStr, Allocator);
         ItMod->AddMember("name", Text, Allocator);
       }
     }
@@ -87,7 +100,7 @@ SpecTest::CommandID resolveCommand(std::string_view Name) {
   return SpecTest::CommandID::Unknown;
 }
 
-/// Helper function to parse parameters from json to vector of value.
+// Helper function to parse parameters from json to vector of value.
 std::pair<std::vector<WasmEdge::ValVariant>, std::vector<WasmEdge::ValType>>
 parseValueList(const rapidjson::Value &Args) {
   std::vector<WasmEdge::ValVariant> Result;
@@ -103,7 +116,7 @@ parseValueList(const rapidjson::Value &Args) {
         if (Value == "null"sv) {
           Result.emplace_back(WasmEdge::UnknownRef());
         } else {
-          /// Add 0x1 uint32_t prefix in this externref index case.
+          // Add 0x1 uint32_t prefix in this externref index case.
           Result.emplace_back(WasmEdge::ExternRef(
               reinterpret_cast<void *>(std::stoul(Value) + 0x100000000ULL)));
         }
@@ -112,7 +125,10 @@ parseValueList(const rapidjson::Value &Args) {
         if (Value == "null"sv) {
           Result.emplace_back(WasmEdge::UnknownRef());
         } else {
-          Result.emplace_back(WasmEdge::FuncRef(std::stoul(Value)));
+          // Add 0x1 uint32_t prefix in this funcref index case.
+          Result.emplace_back(WasmEdge::FuncRef(
+              reinterpret_cast<WasmEdge::Runtime::Instance::FunctionInstance *>(
+                  std::stoul(Value) + 0x100000000ULL)));
         }
         ResultTypes.emplace_back(WasmEdge::ValType::FuncRef);
       } else if (Type == "i32"sv) {
@@ -128,47 +144,49 @@ parseValueList(const rapidjson::Value &Args) {
         Result.emplace_back(static_cast<uint64_t>(std::stoull(Value)));
         ResultTypes.emplace_back(WasmEdge::ValType::F64);
       } else {
-        assert(false);
+        assumingUnreachable();
       }
     } else if (ValueNode.IsArray()) {
       WasmEdge::uint64x2_t I64x2;
       const auto LaneType = Element["lane_type"].Get<std::string>();
       if (LaneType == "i64"sv || LaneType == "f64"sv) {
-        for (size_t I = 0; I < 2; ++I) {
+        for (rapidjson::SizeType I = 0; I < 2; ++I) {
           I64x2[I] = std::stoull(ValueNode[I].Get<std::string>());
         }
       } else if (LaneType == "i32"sv || LaneType == "f32"sv) {
         using uint32x4_t = uint32_t __attribute__((vector_size(16)));
-        uint32x4_t I32x4;
-        for (size_t I = 0; I < 4; ++I) {
+        uint32x4_t I32x4 = {0};
+        for (rapidjson::SizeType I = 0; I < 4; ++I) {
           I32x4[I] = std::stoul(ValueNode[I].Get<std::string>());
         }
         I64x2 = reinterpret_cast<WasmEdge::uint64x2_t>(I32x4);
       } else if (LaneType == "i16"sv) {
         using uint16x8_t = uint16_t __attribute__((vector_size(16)));
-        uint16x8_t I16x8;
-        for (size_t I = 0; I < 8; ++I) {
-          I16x8[I] = std::stoul(ValueNode[I].Get<std::string>());
+        uint16x8_t I16x8 = {0};
+        for (rapidjson::SizeType I = 0; I < 8; ++I) {
+          I16x8[I] = static_cast<uint16_t>(
+              std::stoul(ValueNode[I].Get<std::string>()));
         }
         I64x2 = reinterpret_cast<WasmEdge::uint64x2_t>(I16x8);
       } else if (LaneType == "i8"sv) {
         using uint8x16_t = uint8_t __attribute__((vector_size(16)));
-        uint8x16_t I8x16;
-        for (size_t I = 0; I < 16; ++I) {
-          I8x16[I] = std::stoul(ValueNode[I].Get<std::string>());
+        uint8x16_t I8x16 = {0};
+        for (rapidjson::SizeType I = 0; I < 16; ++I) {
+          I8x16[I] =
+              static_cast<uint8_t>(std::stoul(ValueNode[I].Get<std::string>()));
         }
         I64x2 = reinterpret_cast<WasmEdge::uint64x2_t>(I8x16);
       }
       Result.emplace_back(I64x2);
       ResultTypes.emplace_back(WasmEdge::ValType::V128);
     } else {
-      assert(false);
+      assumingUnreachable();
     }
   }
   return {Result, ResultTypes};
 }
 
-/// Helper function to parse parameters from json to vector of string pair.
+// Helper function to parse parameters from json to vector of string pair.
 std::vector<std::pair<std::string, std::string>>
 parseExpectedList(const rapidjson::Value &Args) {
   std::vector<std::pair<std::string, std::string>> Result;
@@ -188,7 +206,7 @@ parseExpectedList(const rapidjson::Value &Args) {
       Value.pop_back();
       Result.emplace_back(Type + LaneType, std::move(Value));
     } else {
-      assert(false);
+      assumingUnreachable();
     }
   }
   return Result;
@@ -200,7 +218,10 @@ struct TestsuiteProposal {
 };
 static const TestsuiteProposal TestsuiteProposals[] = {
     {"core"sv, {}},
-    {"simd"sv, {WasmEdge::Proposal::SIMD}},
+    {"multi-memory"sv, {Proposal::MultiMemories}},
+    {"tail-call"sv, {Proposal::TailCall}},
+    {"extended-const"sv, {Proposal::ExtendedConst}},
+    {"threads"sv, {Proposal::Threads}},
 };
 
 } // namespace
@@ -230,196 +251,210 @@ std::tuple<std::string_view, WasmEdge::Configure, std::string>
 SpecTest::resolve(std::string_view Params) const {
   const auto Pos = Params.find_last_of(' ');
   const std::string_view ProposalPath = Params.substr(0, Pos);
-  const auto Proposal = *std::find_if(std::begin(TestsuiteProposals),
-                                      std::end(TestsuiteProposals),
-                                      [&ProposalPath](const auto Proposal) {
-                                        return Proposal.Path == ProposalPath;
-                                      });
+  const auto &MatchedProposal = *std::find_if(
+      std::begin(TestsuiteProposals), std::end(TestsuiteProposals),
+      [&ProposalPath](const auto &Proposal) {
+        return Proposal.Path == ProposalPath;
+      });
   return std::tuple<std::string_view, WasmEdge::Configure, std::string>{
-      Proposal.Path, Proposal.Conf, Params.substr(Pos + 1)};
+      MatchedProposal.Path, MatchedProposal.Conf, Params.substr(Pos + 1)};
 }
 
-bool SpecTest::compare(
+bool SpecTest::compare(const std::pair<std::string, std::string> &Expected,
+                       const std::pair<ValVariant, ValType> &Got) const {
+  const auto &TypeStr = Expected.first;
+  const auto &ValStr = Expected.second;
+  bool IsV128 = (std::string_view(TypeStr).substr(0, 4) == "v128"sv);
+  if (!IsV128 && ValStr.substr(0, 4) == "nan:"sv) {
+    // Handle NaN case
+    // TODO: nan:canonical and nan:arithmetic
+    if (TypeStr == "f32"sv) {
+      if (Got.second != ValType::F32) {
+        return false;
+      }
+      return std::isnan(Got.first.get<float>());
+    } else if (TypeStr == "f64"sv) {
+      if (Got.second != ValType::F64) {
+        return false;
+      }
+      return std::isnan(Got.first.get<double>());
+    }
+  } else if (TypeStr == "funcref"sv) {
+    if (Got.second != ValType::FuncRef) {
+      return false;
+    }
+    if (ValStr == "null"sv) {
+      return WasmEdge::isNullRef(Got.first);
+    } else {
+      if (WasmEdge::isNullRef(Got.first)) {
+        return false;
+      }
+      return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(
+                 WasmEdge::retrieveFuncRef(Got.first))) ==
+             static_cast<uint32_t>(std::stoul(ValStr));
+    }
+  } else if (TypeStr == "externref"sv) {
+    if (Got.second != ValType::ExternRef) {
+      return false;
+    }
+    if (ValStr == "null"sv) {
+      return WasmEdge::isNullRef(Got.first);
+    } else {
+      if (WasmEdge::isNullRef(Got.first)) {
+        return false;
+      }
+      return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(
+                 &WasmEdge::retrieveExternRef<uint32_t>(Got.first))) ==
+             static_cast<uint32_t>(std::stoul(ValStr));
+    }
+  } else if (TypeStr == "i32"sv) {
+    if (Got.second != ValType::I32) {
+      return false;
+    }
+    return Got.first.get<uint32_t>() == uint32_t(std::stoul(ValStr));
+  } else if (TypeStr == "f32"sv) {
+    if (Got.second != ValType::F32) {
+      return false;
+    }
+    // Compare the 32-bit pattern
+    return Got.first.get<uint32_t>() == uint32_t(std::stoul(ValStr));
+  } else if (TypeStr == "i64"sv) {
+    if (Got.second != ValType::I64) {
+      return false;
+    }
+    return Got.first.get<uint64_t>() == uint64_t(std::stoull(ValStr));
+  } else if (TypeStr == "f64"sv) {
+    if (Got.second != ValType::F64) {
+      return false;
+    }
+    // Compare the 64-bit pattern
+    return Got.first.get<uint64_t>() == uint64_t(std::stoull(ValStr));
+  } else if (IsV128) {
+    std::vector<std::string_view> Parts;
+    std::string_view Ev = ValStr;
+    if (Got.second != ValType::V128) {
+      return false;
+    }
+    for (std::string::size_type Begin = 0, End = Ev.find(' ');
+         Begin != std::string::npos;
+         Begin = 1 + End, End = Ev.find(' ', Begin)) {
+      Parts.push_back(Ev.substr(Begin, End - Begin));
+      if (End == std::string::npos) {
+        break;
+      }
+    }
+    std::string_view LaneType = std::string_view(TypeStr).substr(4);
+    if (LaneType == "f32") {
+      const uint64x2_t V64 = {
+          static_cast<uint64_t>(Got.first.get<uint128_t>()),
+          static_cast<uint64_t>(Got.first.get<uint128_t>() >> 64U)};
+      const auto VF = reinterpret_cast<floatx4_t>(V64);
+      const auto VI = reinterpret_cast<uint32x4_t>(V64);
+      for (size_t I = 0; I < 4; ++I) {
+        if (Parts[I].substr(0, 4) == "nan:"sv) {
+          if (!std::isnan(VF[I])) {
+            return false;
+          }
+        } else {
+          const uint32_t V1 = VI[I];
+          const uint32_t V2 = std::stoul(std::string(Parts[I]));
+          if (V1 != V2) {
+            return false;
+          }
+        }
+      }
+    } else if (LaneType == "f64") {
+      const uint64x2_t V64 = {
+          static_cast<uint64_t>(Got.first.get<uint128_t>()),
+          static_cast<uint64_t>(Got.first.get<uint128_t>() >> 64U)};
+      const auto VF = reinterpret_cast<doublex2_t>(V64);
+      const auto VI = reinterpret_cast<uint64x2_t>(V64);
+      for (size_t I = 0; I < 2; ++I) {
+        if (Parts[I].substr(0, 4) == "nan:"sv) {
+          if (!std::isnan(VF[I])) {
+            return false;
+          }
+        } else {
+          const uint64_t V1 = VI[I];
+          const uint64_t V2 = std::stoull(std::string(Parts[I]));
+          if (V1 != V2) {
+            return false;
+          }
+        }
+      }
+    } else if (LaneType == "i8") {
+      const uint64x2_t V64 = {
+          static_cast<uint64_t>(Got.first.get<uint128_t>()),
+          static_cast<uint64_t>(Got.first.get<uint128_t>() >> 64U)};
+      const auto V = reinterpret_cast<uint8x16_t>(V64);
+      for (size_t I = 0; I < 16; ++I) {
+        const uint8_t V1 = V[I];
+        const uint8_t V2 =
+            static_cast<uint8_t>(std::stoul(std::string(Parts[I])));
+        if (V1 != V2) {
+          return false;
+        }
+      }
+    } else if (LaneType == "i16") {
+      const uint64x2_t V64 = {
+          static_cast<uint64_t>(Got.first.get<uint128_t>()),
+          static_cast<uint64_t>(Got.first.get<uint128_t>() >> 64U)};
+      const auto V = reinterpret_cast<uint16x8_t>(V64);
+      for (size_t I = 0; I < 8; ++I) {
+        const uint16_t V1 = V[I];
+        const uint16_t V2 =
+            static_cast<uint16_t>(std::stoul(std::string(Parts[I])));
+        if (V1 != V2) {
+          return false;
+        }
+      }
+    } else if (LaneType == "i32") {
+      const uint64x2_t V64 = {
+          static_cast<uint64_t>(Got.first.get<uint128_t>()),
+          static_cast<uint64_t>(Got.first.get<uint128_t>() >> 64U)};
+      const auto V = reinterpret_cast<uint32x4_t>(V64);
+      for (size_t I = 0; I < 4; ++I) {
+        const uint32_t V1 = V[I];
+        const uint32_t V2 = std::stoul(std::string(Parts[I]));
+        if (V1 != V2) {
+          return false;
+        }
+      }
+    } else if (LaneType == "i64") {
+      const uint64x2_t V = {
+          static_cast<uint64_t>(Got.first.get<uint128_t>()),
+          static_cast<uint64_t>(Got.first.get<uint128_t>() >> 64U)};
+      for (size_t I = 0; I < 2; ++I) {
+        const uint64_t V1 = V[I];
+        const uint64_t V2 = std::stoull(std::string(Parts[I]));
+        if (V1 != V2) {
+          return false;
+        }
+      }
+    } else {
+      return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+bool SpecTest::compares(
     const std::vector<std::pair<std::string, std::string>> &Expected,
-    const std::vector<ValVariant> &Got) const {
+    const std::vector<std::pair<ValVariant, ValType>> &Got) const {
   if (Expected.size() != Got.size()) {
     return false;
   }
   for (size_t I = 0; I < Expected.size(); ++I) {
-    const auto &[Type, E] = Expected[I];
-    const auto &G = Got[I];
-    if (E.substr(0, 4) == "nan:"sv) {
-      /// Handle NaN case
-      /// TODO: nan:canonical and nan:arithmetic
-      if (Type == "f32"sv) {
-        const float F = G.get<float>();
-        if (!std::isnan(F)) {
-          return false;
-        }
-      } else if (Type == "f64"sv) {
-        const double D = G.get<double>();
-        if (!std::isnan(D)) {
-          return false;
-        }
-      }
-    } else if (Type == "funcref"sv) {
-      /// Handle reference value case
-      if (E == "null"sv) {
-        return WasmEdge::isNullRef(G);
-      } else {
-        if (WasmEdge::isNullRef(G)) {
-          return false;
-        }
-        uint32_t V1 = WasmEdge::retrieveFuncIdx(G);
-        uint32_t V2 = static_cast<uint32_t>(std::stoul(E));
-        if (V1 != V2) {
-          return false;
-        }
-      }
-    } else if (Type == "externref"sv) {
-      /// Handle reference value case
-      if (E == "null"sv) {
-        return WasmEdge::isNullRef(G);
-      } else {
-        if (WasmEdge::isNullRef(G)) {
-          return false;
-        }
-        /// The added 0x1 uint32_t prefix in externref index case will be
-        /// discarded
-        uint32_t V1 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(
-            &WasmEdge::retrieveExternRef<uint32_t>(G)));
-        uint32_t V2 = static_cast<uint32_t>(std::stoul(E));
-        if (V1 != V2) {
-          return false;
-        }
-      }
-    } else if (Type == "i32"sv || Type == "f32"sv) {
-      const uint32_t V1 = uint32_t(std::stoul(E));
-      const uint32_t V2 = G.get<uint32_t>();
-      if (V1 != V2) {
-        return false;
-      }
-    } else if (Type == "i64"sv || Type == "f64"sv) {
-      const uint64_t V2 = uint64_t(std::stoull(E));
-      const uint64_t V1 = G.get<uint64_t>();
-      if (V1 != V2) {
-        return false;
-      }
-    } else if (std::string_view(Type).substr(0, 4) == "v128"sv) {
-      std::vector<std::string_view> Parts;
-      std::string_view Ev = E;
-      for (std::string::size_type Begin = 0, End = Ev.find(' ');
-           Begin != std::string::npos;
-           Begin = 1 + End, End = Ev.find(' ', Begin)) {
-        Parts.push_back(Ev.substr(Begin, End - Begin));
-        if (End == std::string::npos) {
-          break;
-        }
-      }
-      std::string_view LaneType = std::string_view(Type).substr(4);
-      if (LaneType == "f32") {
-        using uint64x2_t [[gnu::vector_size(16)]] = uint64_t;
-        using floatx4_t [[gnu::vector_size(16)]] = float;
-        using uint32x4_t [[gnu::vector_size(16)]] = uint32_t;
-        const uint64x2_t V64 = {
-            static_cast<uint64_t>(G.get<uint128_t>()),
-            static_cast<uint64_t>(G.get<uint128_t>() >> 64U)};
-        const auto VF = reinterpret_cast<floatx4_t>(V64);
-        const auto VI = reinterpret_cast<uint32x4_t>(V64);
-        for (size_t I = 0; I < 4; ++I) {
-          if (Parts[I].substr(0, 4) == "nan:"sv) {
-            if (!std::isnan(VF[I])) {
-              return false;
-            }
-          } else {
-            const uint32_t V2 = std::stoull(std::string(Parts[I]));
-            const uint32_t V1 = VI[I];
-            if (V1 != V2) {
-              return false;
-            }
-          }
-        }
-      } else if (LaneType == "f64") {
-        using doublex2_t [[gnu::vector_size(16)]] = double;
-        using uint64x2_t [[gnu::vector_size(16)]] = uint64_t;
-        const uint64x2_t V64 = {
-            static_cast<uint64_t>(G.get<uint128_t>()),
-            static_cast<uint64_t>(G.get<uint128_t>() >> 64U)};
-        const auto VF = reinterpret_cast<doublex2_t>(V64);
-        const auto VI = reinterpret_cast<uint64x2_t>(V64);
-        for (size_t I = 0; I < 2; ++I) {
-          if (Parts[I].substr(0, 4) == "nan:"sv) {
-            if (!std::isnan(VF[I])) {
-              return false;
-            }
-          } else {
-            const uint64_t V2 = std::stoull(std::string(Parts[I]));
-            const uint64_t V1 = VI[I];
-            if (V1 != V2) {
-              return false;
-            }
-          }
-        }
-      } else if (LaneType == "i8") {
-        using uint8x16_t [[gnu::vector_size(16)]] = uint8_t;
-        const uint64x2_t V64 = {
-            static_cast<uint64_t>(G.get<uint128_t>()),
-            static_cast<uint64_t>(G.get<uint128_t>() >> 64U)};
-        const auto V = reinterpret_cast<uint8x16_t>(V64);
-        for (size_t I = 0; I < 16; ++I) {
-          const uint8_t V2 = std::stoul(std::string(Parts[I]));
-          const uint8_t V1 = V[I];
-          if (V1 != V2) {
-            return false;
-          }
-        }
-      } else if (LaneType == "i16") {
-        using uint16x8_t [[gnu::vector_size(16)]] = uint16_t;
-        const uint64x2_t V64 = {
-            static_cast<uint64_t>(G.get<uint128_t>()),
-            static_cast<uint64_t>(G.get<uint128_t>() >> 64U)};
-        const auto V = reinterpret_cast<uint16x8_t>(V64);
-        for (size_t I = 0; I < 8; ++I) {
-          const uint16_t V2 = std::stoul(std::string(Parts[I]));
-          const uint16_t V1 = V[I];
-          if (V1 != V2) {
-            return false;
-          }
-        }
-      } else if (LaneType == "i32") {
-        using uint32x4_t [[gnu::vector_size(16)]] = uint32_t;
-        const uint64x2_t V64 = {
-            static_cast<uint64_t>(G.get<uint128_t>()),
-            static_cast<uint64_t>(G.get<uint128_t>() >> 64U)};
-        const auto V = reinterpret_cast<uint32x4_t>(V64);
-        for (size_t I = 0; I < 4; ++I) {
-          const uint32_t V2 = std::stoul(std::string(Parts[I]));
-          const uint32_t V1 = V[I];
-          if (V1 != V2) {
-            return false;
-          }
-        }
-      } else if (LaneType == "i64") {
-        using uint64x2_t [[gnu::vector_size(16)]] = uint64_t;
-        const uint64x2_t V = {static_cast<uint64_t>(G.get<uint128_t>()),
-                              static_cast<uint64_t>(G.get<uint128_t>() >> 64U)};
-        for (size_t I = 0; I < 2; ++I) {
-          const uint64_t V2 = std::stoull(std::string(Parts[I]));
-          const uint64_t V1 = V[I];
-          if (V1 != V2) {
-            return false;
-          }
-        }
-      }
-    } else {
-      assert(false);
+    if (!compare(Expected[I], Got[I])) {
+      return false;
     }
   }
   return true;
 }
 
-bool SpecTest::stringContains(const std::string &Expected,
-                              const std::string &Got) const {
+bool SpecTest::stringContains(std::string_view Expected,
+                              std::string_view Got) const {
   if (Expected.rfind(Got, 0) != 0) {
     spdlog::error("   ##### expected text : {}", Expected);
     spdlog::error("   ######## error text : {}", Got);
@@ -440,14 +475,14 @@ void SpecTest::run(std::string_view Proposal, std::string_view UnitName) {
   std::map<std::string, std::string> Alias;
   std::string LastModName;
 
-  /// Helper function to get module name.
+  // Helper function to get module name.
   auto GetModuleName = [&](const rapidjson::Value &Action) -> std::string {
     if (const auto &Module = Action.FindMember("module"s);
         Module != Action.MemberEnd()) {
-      /// Get the module name.
+      // Get the module name.
       auto ModName = Module->value.Get<std::string>();
       if (auto It = Alias.find(ModName); It != Alias.end()) {
-        /// If module name is aliased, use the aliased name.
+        // If module name is aliased, use the aliased name.
         return It->second;
       }
       return ModName;
@@ -462,20 +497,16 @@ void SpecTest::run(std::string_view Proposal, std::string_view UnitName) {
     const auto Params = parseValueList(Action["args"s]);
     const auto Returns = parseExpectedList(Expected);
 
-    /// Invoke function of named module. Named modules are registered in Store
-    /// Manager. Anonymous modules are instantiated in VM.
+    // Invoke function of named module. Named modules are registered in Store
+    // Manager. Anonymous modules are instantiated in VM.
     if (auto Res = onInvoke(ModName, Field, Params.first, Params.second)) {
-      /// Check value.
-      if (compare(Returns, *Res)) {
-        EXPECT_TRUE(true);
-      } else {
-        EXPECT_NE(LineNumber, LineNumber);
-      }
+      // Check value.
+      EXPECT_TRUE(compares(Returns, *Res));
     } else {
       EXPECT_NE(LineNumber, LineNumber);
     }
   };
-  /// Helper function to get values.
+  // Helper function to get values.
   auto Get = [&](const rapidjson::Value &Action,
                  const rapidjson::Value &Expected, uint64_t LineNumber) {
     const auto ModName = GetModuleName(Action);
@@ -483,8 +514,8 @@ void SpecTest::run(std::string_view Proposal, std::string_view UnitName) {
     const auto Returns = parseExpectedList(Expected);
 
     if (auto Res = onGet(ModName, Field)) {
-      /// Check value.
-      EXPECT_TRUE(compare(Returns, *Res));
+      // Check value.
+      EXPECT_TRUE(compare(Returns[0], *Res));
     } else {
       EXPECT_NE(LineNumber, LineNumber);
     }
@@ -493,7 +524,8 @@ void SpecTest::run(std::string_view Proposal, std::string_view UnitName) {
     if (auto Res = onLoad(Filename)) {
       EXPECT_TRUE(false);
     } else {
-      EXPECT_TRUE(stringContains(Text, WasmEdge::ErrCodeStr[Res.error()]));
+      EXPECT_TRUE(
+          stringContains(Text, WasmEdge::ErrCodeStr[Res.error().getEnum()]));
     }
   };
   auto TrapInvoke = [&](const rapidjson::Value &Action, const std::string &Text,
@@ -505,8 +537,9 @@ void SpecTest::run(std::string_view Proposal, std::string_view UnitName) {
     if (auto Res = onInvoke(ModName, Field, Params.first, Params.second)) {
       EXPECT_NE(LineNumber, LineNumber);
     } else {
-      /// Check value.
-      EXPECT_TRUE(stringContains(Text, WasmEdge::ErrCodeStr[Res.error()]));
+      // Check value.
+      EXPECT_TRUE(
+          stringContains(Text, WasmEdge::ErrCodeStr[Res.error().getEnum()]));
     }
   };
   auto TrapValidate = [&](const std::string &Filename,
@@ -514,7 +547,8 @@ void SpecTest::run(std::string_view Proposal, std::string_view UnitName) {
     if (auto Res = onValidate(Filename); Res) {
       EXPECT_TRUE(false);
     } else {
-      EXPECT_TRUE(stringContains(Text, WasmEdge::ErrCodeStr[Res.error()]));
+      EXPECT_TRUE(
+          stringContains(Text, WasmEdge::ErrCodeStr[Res.error().getEnum()]));
     }
   };
   auto TrapInstantiate = [&](const std::string &Filename,
@@ -522,13 +556,14 @@ void SpecTest::run(std::string_view Proposal, std::string_view UnitName) {
     if (auto Res = onInstantiate(Filename); Res) {
       EXPECT_TRUE(false);
     } else {
-      EXPECT_TRUE(stringContains(Text, WasmEdge::ErrCodeStr[Res.error()]));
+      EXPECT_TRUE(
+          stringContains(Text, WasmEdge::ErrCodeStr[Res.error().getEnum()]));
     }
   };
 
-  /// Command processing. Return true for expected result.
+  // Command processing. Return true for expected result.
   auto RunCommand = [&](const rapidjson::Value &Cmd) {
-    /// Line number in wast: Cmd["line"].Get<uint32_t>()
+    // Line number in wast: Cmd["line"].Get<uint32_t>()
     if (const auto Type = Cmd.FindMember("type"s); Type != Cmd.MemberEnd()) {
       switch (resolveCommand(Type->value.Get<std::string>())) {
       case SpecTest::CommandID::Module: {
@@ -537,10 +572,10 @@ void SpecTest::run(std::string_view Proposal, std::string_view UnitName) {
                                   .u8string();
         const uint64_t LineNumber = Cmd["line"].Get<uint64_t>();
         if (const auto Name = Cmd.FindMember("name"); Name != Cmd.MemberEnd()) {
-          /// Module has name. Register module with module name.
+          // Module has name. Register module with module name.
           LastModName = Name->value.Get<std::string>();
         } else {
-          /// Instantiate the anonymous module.
+          // Instantiate the anonymous module.
           LastModName.clear();
         }
         if (onModule(LastModName, FileName)) {
@@ -558,7 +593,7 @@ void SpecTest::run(std::string_view Proposal, std::string_view UnitName) {
         return;
       }
       case CommandID::Register: {
-        /// Preprocessed. Ignore this.
+        // Preprocessed. Ignore this.
         return;
       }
       case CommandID::AssertReturn: {
@@ -584,13 +619,13 @@ void SpecTest::run(std::string_view Proposal, std::string_view UnitName) {
         return;
       }
       case CommandID::AssertExhaustion: {
-        /// TODO: Add stack overflow mechanism.
+        // TODO: Add stack overflow mechanism.
         return;
       }
       case CommandID::AssertMalformed: {
         const auto &ModType = Cmd["module_type"s].Get<std::string>();
         if (ModType != "binary") {
-          /// TODO: Wat is not supported in WasmEdge yet.
+          // TODO: Wat is not supported in WasmEdge yet.
           return;
         }
         const auto Filename = (TestsuiteRoot / Proposal / UnitName /
@@ -620,20 +655,20 @@ void SpecTest::run(std::string_view Proposal, std::string_view UnitName) {
       default:;
       }
     }
-    /// Unknown command.
+    // Unknown command.
     EXPECT_TRUE(false);
   };
 
-  /// Get command list.
+  // Get command list.
   if (auto Commands = Doc.FindMember("commands"s);
       Commands != Doc.MemberEnd()) {
     rapidjson::Value CmdArray;
     CmdArray.CopyFrom(Commands->value, Allocator);
 
-    /// Preprocessing register command.
+    // Preprocessing register command.
     resolveRegister(Alias, CmdArray, Allocator);
 
-    /// Iterate commands.
+    // Iterate commands.
     for (const auto &Cmd : CmdArray.GetArray()) {
       RunCommand(Cmd);
     }

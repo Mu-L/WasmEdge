@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 #pragma once
 
 #include "host/wasi/environ.h"
-#include "runtime/importobj.h"
+#include "runtime/instance/module.h"
 
 namespace WasmEdge {
 namespace Host {
 
-class WasiModule : public Runtime::ImportObject {
+class WasiModule : public Runtime::Instance::ModuleInstance {
 public:
   WasiModule();
 
-  WASI::Environ &getEnv() { return Env; }
+  WASI::Environ &getEnv() noexcept { return Env; }
+  const WASI::Environ &getEnv() const noexcept { return Env; }
 
 private:
   WASI::Environ Env;

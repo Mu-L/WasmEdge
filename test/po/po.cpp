@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
 
-#include "experimental/span.hpp"
 #include "po/argument_parser.h"
 #include "po/list.h"
 #include "po/option.h"
-#include "gtest/gtest.h"
-#include <numeric>
+#include <cctype>
+#include <cstddef>
+#include <gtest/gtest.h>
+#include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 using namespace WasmEdge::PO;
@@ -48,7 +52,8 @@ public:
 
 TEST_P(GeneralOptions, Test) {
   auto P = GetParam();
-  EXPECT_EQ(P.R, Parser.parse(P.Args.size(), P.Args.data()));
+  EXPECT_EQ(P.R, Parser.parse(stdout, static_cast<int>(P.Args.size()),
+                              P.Args.data()));
   if (P.R) {
     EXPECT_EQ(P.A, A.value());
     EXPECT_EQ(P.B, B.value());

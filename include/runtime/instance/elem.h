@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/runtime/instance/elem.h - Element Instance definition ----===//
 //
 // Part of the WasmEdge Project.
@@ -24,14 +26,14 @@ class ElementInstance {
 public:
   ElementInstance() = delete;
   ElementInstance(const uint32_t Offset, const RefType EType,
-                  Span<const RefVariant> Init)
+                  Span<const RefVariant> Init) noexcept
       : Off(Offset), Type(EType), Refs(Init.begin(), Init.end()) {}
 
   /// Get offset in element instance.
   uint32_t getOffset() const noexcept { return Off; }
 
   /// Get reference type of element instance.
-  RefType getRefType() const { return Type; }
+  RefType getRefType() const noexcept { return Type; }
 
   /// Get reference lists in element instance.
   Span<const RefVariant> getRefs() const noexcept { return Refs; }

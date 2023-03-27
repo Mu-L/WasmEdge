@@ -1,51 +1,69 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2019-2022 Second State INC
 
 find_package(LLVM REQUIRED HINTS "${LLVM_CMAKE_PATH}")
+get_filename_component(LLVM_DIR "${LLVM_DIR}" ABSOLUTE)
 list(APPEND CMAKE_MODULE_PATH ${LLVM_DIR})
 include(LLVMConfig)
 include(AddLLVM)
 
-find_library(LLD_COMMON lldCommon PATHS "${LLVM_LIBRARY_DIR}")
-find_library(LLD_CORE lldCore PATHS "${LLVM_LIBRARY_DIR}")
-find_library(LLD_DRIVER lldDriver PATHS "${LLVM_LIBRARY_DIR}")
-find_library(LLD_READERWRITER lldReaderWriter PATHS "${LLVM_LIBRARY_DIR}")
-find_library(LLD_YAML lldYAML PATHS "${LLVM_LIBRARY_DIR}")
-if(APPLE)
-  find_library(LLD_SYSTEM lldMachO PATHS "${LLVM_LIBRARY_DIR}")
-elseif(WIN32)
-  find_library(LLD_SYSTEM lldCOFF PATHS "${LLVM_LIBRARY_DIR}")
-  set(EXTRA_COMPONENTS DebugInfoPDB LibDriver WindowsManifest)
-else()
-  find_library(LLD_SYSTEM lldELF PATHS "${LLVM_LIBRARY_DIR}")
-endif()
+get_filename_component(LLD_DIR "${LLVM_LIBRARY_DIR}/cmake/lld" ABSOLUTE)
+find_package(LLD REQUIRED HINTS ${LLD_DIR})
 
-llvm_add_library(wasmedgeAOT
-  blake3.cpp
-  cache.cpp
-  compiler.cpp
-  LINK_LIBS
-  wasmedgeCommon
-  wasmedgeSystem
-  utilBlake3
-  ${LLD_SYSTEM}
-  ${LLD_COMMON}
-  ${LLD_CORE}
-  ${LLD_DRIVER}
-  ${LLD_READERWRITER}
-  ${LLD_YAML}
-  std::filesystem
-  ${CMAKE_THREAD_LIBS_INIT}
-  LINK_COMPONENTS
-  core
-  lto
-  native
-  nativecodegen
-  option
-  passes
-  support
-  transformutils
-  ${EXTRA_COMPONENTS}
-)
+if(WASMEDGE_LINK_LLVM_STATIC)
+  wasmedge_add_library(wasmedgeAOT
+    blake3.cpp
+    cache.cpp
+    compiler.cpp
+  )
+
+  target_link_libraries(wasmedgeAOT
+    PUBLIC
+    wasmedgeCommon
+    wasmedgeSystem
+    utilBlake3
+    std::filesystem
+    ${WASMEDGE_LLVM_LINK_STATIC_COMPONENTS}
+    ${WASMEDGE_LLVM_LINK_SHARED_COMPONENTS}
+  )
+else()
+  if(APPLE)
+    list(APPEND LLD_LIBS lldMachO)
+  elseif(WIN32)
+    list(APPEND LLD_LIBS lldCOFF)
+    set(EXTRA_COMPONENTS DebugInfoPDB LibDriver WindowsManifest)
+  else()
+    list(APPEND LLD_LIBS lldELF)
+  endif()
+
+  list(APPEND LLD_LIBS lldCommon)
+  if(LLVM_VERSION_MAJOR LESS_EQUAL 13)
+    list(APPEND LLD_LIBS lldDriver)
+  endif()
+
+  llvm_add_library(wasmedgeAOT
+    blake3.cpp
+    cache.cpp
+    compiler.cpp
+    LINK_LIBS
+    wasmedgeCommon
+    wasmedgeSystem
+    utilBlake3
+    ${LLD_LIBS}
+    std::filesystem
+    ${CMAKE_THREAD_LIBS_INIT}
+    LINK_COMPONENTS
+    core
+    lto
+    native
+    nativecodegen
+    option
+    passes
+    support
+    transformutils
+    ${EXTRA_COMPONENTS}
+  )
+endif()
 
 wasmedge_setup_target(wasmedgeAOT)
 
@@ -60,3 +78,17 @@ target_include_directories(wasmedgeAOT
   ${PROJECT_BINARY_DIR}/include
   ${PROJECT_SOURCE_DIR}/thirdparty/blake3
 )
+
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_LINK_OPTIONS "-Wl,-lc,--exclude-libs=libc.a")
+check_cxx_source_compiles("int main(){}" SUPPORT_EXCLUDE_LIBS)
+
+if(SUPPORT_EXCLUDE_LIBS)
+  file(GLOB LLD_ALL_LIBS ${LLVM_LIBRARY_DIR}/liblld*.a)
+  list(TRANSFORM LLD_ALL_LIBS REPLACE "^.*/" "")
+  string(JOIN : LLD_ALL_LIBS_COLON ${LLD_ALL_LIBS})
+  target_link_options(wasmedgeAOT
+    PUBLIC
+    "SHELL:-Wl,--exclude-libs=${LLD_ALL_LIBS_COLON}"
+  )
+endif()

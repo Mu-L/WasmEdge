@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 #include "common/defines.h"
 #if !WASMEDGE_OS_MACOS
 #error
@@ -12,8 +14,10 @@
 #include <TargetConditionals.h>
 #include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <dirent.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <sys/event.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -183,7 +187,36 @@ inline constexpr __wasi_errno_t fromErrNo(int ErrNo) noexcept {
   case EXDEV:
     return __WASI_ERRNO_XDEV;
   default:
-    __builtin_unreachable();
+    assumingUnreachable();
+  }
+}
+
+inline constexpr __wasi_errno_t fromEAIErrNo(int ErrNo) noexcept {
+  switch (ErrNo) {
+  case EAI_ADDRFAMILY:
+    return __WASI_ERRNO_AIADDRFAMILY;
+  case EAI_AGAIN:
+    return __WASI_ERRNO_AIAGAIN;
+  case EAI_BADFLAGS:
+    return __WASI_ERRNO_AIBADFLAG;
+  case EAI_FAIL:
+    return __WASI_ERRNO_AIFAIL;
+  case EAI_FAMILY:
+    return __WASI_ERRNO_AIFAMILY;
+  case EAI_MEMORY:
+    return __WASI_ERRNO_AIMEMORY;
+  case EAI_NODATA:
+    return __WASI_ERRNO_AINODATA;
+  case EAI_NONAME:
+    return __WASI_ERRNO_AINONAME;
+  case EAI_SERVICE:
+    return __WASI_ERRNO_AISERVICE;
+  case EAI_SOCKTYPE:
+    return __WASI_ERRNO_AISOCKTYPE;
+  case EAI_SYSTEM:
+    return __WASI_ERRNO_AISYSTEM;
+  default:
+    assumingUnreachable();
   }
 }
 
@@ -198,7 +231,7 @@ inline constexpr clockid_t toClockId(__wasi_clockid_t Clock) noexcept {
   case __WASI_CLOCKID_THREAD_CPUTIME_ID:
     return CLOCK_THREAD_CPUTIME_ID;
   default:
-    __builtin_unreachable();
+    assumingUnreachable();
   }
 }
 
@@ -289,7 +322,188 @@ inline constexpr int toWhence(__wasi_whence_t Whence) noexcept {
   case __WASI_WHENCE_SET:
     return SEEK_SET;
   default:
-    __builtin_unreachable();
+    assumingUnreachable();
+  }
+}
+
+inline constexpr int toSockOptLevel(__wasi_sock_opt_level_t Level) noexcept {
+  switch (Level) {
+  case __WASI_SOCK_OPT_LEVEL_SOL_SOCKET:
+    return SOL_SOCKET;
+  default:
+    assumingUnreachable();
+  }
+}
+
+inline constexpr int toSockOptSoName(__wasi_sock_opt_so_t SoName) noexcept {
+  switch (SoName) {
+  case __WASI_SOCK_OPT_SO_REUSEADDR:
+    return SO_REUSEADDR;
+  case __WASI_SOCK_OPT_SO_TYPE:
+    return SO_TYPE;
+  case __WASI_SOCK_OPT_SO_ERROR:
+    return SO_REUSEADDR;
+  case __WASI_SOCK_OPT_SO_DONTROUTE:
+    return SO_TYPE;
+  case __WASI_SOCK_OPT_SO_BROADCAST:
+    return SO_REUSEADDR;
+  case __WASI_SOCK_OPT_SO_SNDBUF:
+    return SO_TYPE;
+  case __WASI_SOCK_OPT_SO_RCVBUF:
+    return SO_REUSEADDR;
+  case __WASI_SOCK_OPT_SO_KEEPALIVE:
+    return SO_TYPE;
+  case __WASI_SOCK_OPT_SO_OOBINLINE:
+    return SO_REUSEADDR;
+  case __WASI_SOCK_OPT_SO_LINGER:
+    return SO_TYPE;
+  case __WASI_SOCK_OPT_SO_RCVLOWAT:
+    return SO_REUSEADDR;
+  case __WASI_SOCK_OPT_SO_RCVTIMEO:
+    return SO_TYPE;
+  case __WASI_SOCK_OPT_SO_SNDTIMEO:
+    return SO_REUSEADDR;
+  case __WASI_SOCK_OPT_SO_ACCEPTCONN:
+    return SO_TYPE;
+
+  default:
+    assumingUnreachable();
+  }
+}
+
+inline constexpr __wasi_aiflags_t fromAIFlags(int AIFlags) noexcept {
+  __wasi_aiflags_t Result = static_cast<__wasi_aiflags_t>(0);
+
+  if (AIFlags & AI_PASSIVE) {
+    Result |= __WASI_AIFLAGS_AI_PASSIVE;
+  }
+  if (AIFlags & AI_CANONNAME) {
+    Result |= __WASI_AIFLAGS_AI_CANONNAME;
+  }
+  if (AIFlags & AI_NUMERICHOST) {
+    Result |= __WASI_AIFLAGS_AI_NUMERICHOST;
+  }
+  if (AIFlags & AI_NUMERICSERV) {
+    Result |= __WASI_AIFLAGS_AI_NUMERICSERV;
+  }
+  if (AIFlags & AI_V4MAPPED) {
+    Result |= __WASI_AIFLAGS_AI_V4MAPPED;
+  }
+  if (AIFlags & AI_ALL) {
+    Result |= __WASI_AIFLAGS_AI_ALL;
+  }
+  if (AIFlags & AI_ADDRCONFIG) {
+    Result |= __WASI_AIFLAGS_AI_ADDRCONFIG;
+  }
+
+  return Result;
+}
+
+inline constexpr int toAIFlags(__wasi_aiflags_t AIFlags) noexcept {
+  int Result = 0;
+
+  if (AIFlags & __WASI_AIFLAGS_AI_PASSIVE) {
+    Result |= AI_PASSIVE;
+  }
+  if (AIFlags & __WASI_AIFLAGS_AI_CANONNAME) {
+    Result |= AI_CANONNAME;
+  }
+  if (AIFlags & __WASI_AIFLAGS_AI_NUMERICHOST) {
+    Result |= AI_NUMERICHOST;
+  }
+  if (AIFlags & __WASI_AIFLAGS_AI_NUMERICSERV) {
+    Result |= AI_NUMERICSERV;
+  }
+  if (AIFlags & __WASI_AIFLAGS_AI_V4MAPPED) {
+    Result |= AI_V4MAPPED;
+  }
+  if (AIFlags & __WASI_AIFLAGS_AI_ALL) {
+    Result |= AI_ALL;
+  }
+  if (AIFlags & __WASI_AIFLAGS_AI_ADDRCONFIG) {
+    Result |= AI_ADDRCONFIG;
+  }
+
+  return Result;
+}
+
+inline constexpr __wasi_sock_type_t fromSockType(int SockType) noexcept {
+  switch (SockType) {
+  case 0:
+    return __WASI_SOCK_TYPE_SOCK_ANY;
+  case SOCK_DGRAM:
+    return __WASI_SOCK_TYPE_SOCK_DGRAM;
+  case SOCK_STREAM:
+    return __WASI_SOCK_TYPE_SOCK_STREAM;
+  default:
+    assumingUnreachable();
+  }
+}
+
+inline constexpr int toSockType(__wasi_sock_type_t SockType) noexcept {
+  switch (SockType) {
+  case __WASI_SOCK_TYPE_SOCK_ANY:
+    return 0;
+  case __WASI_SOCK_TYPE_SOCK_DGRAM:
+    return SOCK_DGRAM;
+  case __WASI_SOCK_TYPE_SOCK_STREAM:
+    return SOCK_STREAM;
+  default:
+    assumingUnreachable();
+  }
+}
+
+inline constexpr __wasi_protocol_t fromProtocol(int Protocol) noexcept {
+  switch (Protocol) {
+  case IPPROTO_IP:
+    return __WASI_PROTOCOL_IPPROTO_IP;
+  case IPPROTO_TCP:
+    return __WASI_PROTOCOL_IPPROTO_TCP;
+  case IPPROTO_UDP:
+    return __WASI_PROTOCOL_IPPROTO_UDP;
+  default:
+    assumingUnreachable();
+  }
+}
+
+inline constexpr int toProtocol(__wasi_protocol_t Protocol) noexcept {
+  switch (Protocol) {
+  case __WASI_PROTOCOL_IPPROTO_IP:
+    return IPPROTO_IP;
+  case __WASI_PROTOCOL_IPPROTO_TCP:
+    return IPPROTO_TCP;
+  case __WASI_PROTOCOL_IPPROTO_UDP:
+    return IPPROTO_UDP;
+  default:
+    assumingUnreachable();
+  }
+}
+
+inline constexpr __wasi_address_family_t
+fromAddressFamily(int AddressFamily) noexcept {
+  switch (AddressFamily) {
+  case PF_UNSPEC:
+    return __WASI_ADDRESS_FAMILY_UNSPEC;
+  case PF_INET:
+    return __WASI_ADDRESS_FAMILY_INET4;
+  case PF_INET6:
+    return __WASI_ADDRESS_FAMILY_INET6;
+  default:
+    assumingUnreachable();
+  }
+}
+
+inline constexpr int
+toAddressFamily(__wasi_address_family_t AddressFamily) noexcept {
+  switch (AddressFamily) {
+  case __WASI_ADDRESS_FAMILY_UNSPEC:
+    return PF_UNSPEC;
+  case __WASI_ADDRESS_FAMILY_INET4:
+    return PF_INET;
+  case __WASI_ADDRESS_FAMILY_INET6:
+    return PF_INET6;
+  default:
+    assumingUnreachable();
   }
 }
 

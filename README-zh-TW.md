@@ -14,6 +14,7 @@ WasmEdge （前名為 SSVM ） 是為邊緣運算最佳化的輕量級、高性�
 [![Total alerts](https://img.shields.io/lgtm/alerts/g/WasmEdge/WasmEdge.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/WasmEdge/WasmEdge/alerts/)
 [![Language grade: C/C++](https://img.shields.io/lgtm/grade/cpp/g/WasmEdge/WasmEdge.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/WasmEdge/WasmEdge/context:cpp)
 [![codecov](https://codecov.io/gh/WasmEdge/WasmEdge/branch/master/graph/badge.svg)](https://codecov.io/gh/WasmEdge/WasmEdge)
+[![CodeQL](https://github.com/WasmEdge/WasmEdge/actions/workflows/codeql-analysis.yml/badge.svg)](https://github.com/WasmEdge/WasmEdge/actions/workflows/codeql-analysis.yml)
 [![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2FWasmEdge%2FWasmEdge.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2FWasmEdge%2FWasmEdge?ref=badge_shield)
 [![CII Best Practices](https://bestpractices.coreinfrastructure.org/projects/5059/badge)](https://bestpractices.coreinfrastructure.org/projects/5059)
   
@@ -21,10 +22,10 @@ WasmEdge （前名為 SSVM ） 是為邊緣運算最佳化的輕量級、高性�
 
 # 快速開始指引
 
-🚀 [安装](docs/install.md) WasmEdge\
-🤖 [編譯](docs/build.md) 並[貢獻](docs/contribution.md) WasmEdge\
-⌨️ [從 CLI 執行](docs/run.md)一個獨立的 Wasm 程式或 [JavaScript 程式](docs/run_javascript.md) \
-🔌 在 [Node.js](https://github.com/second-state/wasm-learning/tree/master/ssvm/file-example) 、 [Go 语言](https://github.com/second-state/WasmEdge-go/tree/master/examples/go_mtcnn)、或是 [Rust 應用程式](https://www.secondstate.io/articles/getting-started-with-rust-function/)嵌入 Wasm 函式
+🚀 [安装](docs/book/zh-TW/src/start/install.md) WasmEdge\
+🤖 [編譯](docs/book/zh-TW/src/extend/build.md) 並[貢獻](docs/book/en/src/contribute.md) WasmEdge\
+⌨️ [從 CLI 執行](docs/book/zh-TW/src/start/cli.md)一個獨立的 Wasm 程式或 [JavaScript 程式](docs/book/zh-TW/src/intro/use/js.md) \
+🔌 在 [Node.js](https://github.com/second-state/wasm-learning/tree/master/ssvm/file-example) 、 [Go 語言](https://github.com/second-state/WasmEdge-go/tree/master/examples/go_mtcnn)、或是 [Rust 應用程式](https://www.secondstate.io/articles/getting-started-with-rust-function/)嵌入 Wasm 函式 \
 🛠 使用 [Docker 工具](https://www.secondstate.io/articles/manage-webassembly-apps-in-wasmedge-using-docker-tools/)、[即時資料流框架](https://www.secondstate.io/articles/yomo-wasmedge-real-time-data-streams/), 和 [區塊鏈](https://medium.com/ethereum-on-steroids/running-ethereum-smart-contracts-in-a-substrate-blockchain-56fbc27fc95a) 管理和編排 Wasm runtimes
 
 # 簡介
@@ -33,14 +34,14 @@ WasmEdge 為其執行的 Wasm bytecode 程式提供了一個有良好定義的�
 
 <div align="center">
   
-**檢視 WasmEdge 的[使用情境](docs/use_cases-zh-TW.md)。**
+**檢視 WasmEdge 的[使用情境](docs/book/zh-TW/src/intro/use.md)。**
 
 </div>
 
 ## 效能
 
-* 論文：[高效能 Serverless 計算的輕量級設計](https://arxiv.org/abs/2010.07115)，發表於 IEEE Software ，2021年1月。 https://arxiv.org/abs/2010.07115
-* 文章：[Performance Analysis for Arm vs. x86 CPUs in the Cloud](https://www.infoq.com/articles/arm-vs-x86-cloud-performance/)，發表於 infoQ.com ，2021年1月。 https://www.infoq.com/articles/arm-vs-x86-cloud-performance/
+* 論文：[高效能 Serverless 計算的輕量級設計](https://arxiv.org/abs/2010.07115)，發表於 IEEE Software ，2021年1月。 [https://arxiv.org/abs/2010.07115](https://arxiv.org/abs/2010.07115)
+* 文章：[Performance Analysis for Arm vs. x86 CPUs in the Cloud](https://www.infoq.com/articles/arm-vs-x86-cloud-performance/)，發表於 infoQ.com ，2021年1月。 [https://www.infoq.com/articles/arm-vs-x86-cloud-performance/](https://www.infoq.com/articles/arm-vs-x86-cloud-performance/)
 
 ## 特性
 
@@ -53,7 +54,7 @@ WebAssembly 的 WasmEdge 擴充通常作為 Rust SDK 或 [JavaScript APIs](docs/
 
 ## 集成
 
-WasmEdge 及其執行的 Wasm 應用程式可以作為新應用程序或以現有的程序從 CLI 啟動。如果從現有程序啟動（例如，從正在執行的 [Node.js](https://www.secondstate.io/articles/getting-started-with-rust-function/) 、 [Golang](https://github.com/second-state/wasmedge-go) 或 [Rust](https://github.com/super-node/WasmEdge/tree/master/wasmedge-rs) 程序）， WasmEdge 將簡單地作為一個函式在程序內運行。目前， WasmEdge 還不是執行緒安全的。如您想在自己的應用程式或者原生雲端框架中使用 WasmEdge ，請參考以下指南。
+WasmEdge 及其執行的 Wasm 應用程式可以作為新應用程序或以現有的程序從 CLI 啟動。如果從現有程序啟動（例如，從正在執行的 [Node.js](https://www.secondstate.io/articles/getting-started-with-rust-function/) 、 [Golang](https://github.com/second-state/wasmedge-go) 或 [Rust](https://github.com/WasmEdge/WasmEdge/tree/master/bindings/rust) 程序）， WasmEdge 將簡單地作為一個函式在程序內運行。目前， WasmEdge 還不是執行緒安全的。如您想在自己的應用程式或者原生雲端框架中使用 WasmEdge ，請參考以下指南。
 
 * [在應用程式中嵌入 WasmEdge](docs/integrations.md#embed-wasmedge-into-a-host-application)
 * [使用容器工具管理和編排 WasmEdge 實例](docs/integrations.md#use-wasmedge-as-a-docker-like-container)
@@ -74,4 +75,5 @@ WasmEdge 及其執行的 Wasm 應用程式可以作為新應用程序或以現�
 * 推特：在 [Twitter](https://twitter.com/realwasmedge) 跟隨 @realwasmedge
 
 ## License
+
 [![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2FWasmEdge%2FWasmEdge.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2FWasmEdge%2FWasmEdge?ref=badge_large)

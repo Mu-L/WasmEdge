@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/loader/filemgr.h - File Manager definition ---------------===//
 //
 // Part of the WasmEdge Project.
@@ -16,6 +18,9 @@
 #include "common/types.h"
 #include "system/mmap.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -25,6 +30,21 @@ namespace WasmEdge {
 /// File manager interface.
 class FileMgr {
 public:
+  enum class FileHeader : uint8_t {
+    // WASM or universal WASM.
+    Wasm,
+    // AOT compiled WASM as Linux ELF.
+    ELF,
+    // AOT compiled WASM as MacOS Mach_O 32-bit.
+    MachO_32,
+    // AOT compiled WASM as MacOS Mach_O 64-bit.
+    MachO_64,
+    // AOT compiled WASM as Windows DLL.
+    DLL,
+    // Unknown file header.
+    Unknown
+  };
+
   /// Set the file path.
   Expect<void> setPath(const std::filesystem::path &FilePath);
 
@@ -46,8 +66,13 @@ public:
   /// Read an unsigned long long int.
   Expect<uint64_t> readU64();
 
+  template <typename Ret, size_t N> Expect<Ret> readSN();
+
   /// Read a signed int.
   Expect<int32_t> readS32();
+
+  /// Read a S33.
+  Expect<int64_t> readS33();
 
   /// Read a signed long long int.
   Expect<int64_t> readS64();
@@ -61,6 +86,9 @@ public:
   /// Read a string, which is size(unsigned int) + bytes.
   Expect<std::string> readName();
 
+  /// Get the file header type.
+  FileHeader getHeaderType();
+
   /// Get current offset.
   uint64_t getOffset() const noexcept { return Pos; }
 
@@ -70,21 +98,21 @@ public:
   /// Get remain size.
   uint64_t getRemainSize() const noexcept { return Size - Pos; }
 
-  /// Set limit read section size.
-  void setSectionSize(uint64_t SecSize) {
-    if (likely(UINT64_MAX - Pos >= SecSize)) {
-      SecPos = std::min(Pos + SecSize, Size);
-    } else {
-      SecPos = std::min(UINT64_MAX - Pos, Size);
+  /// Jump the content with size (size + content).
+  Expect<void> jumpContent();
+
+  /// Change the access position of the file.
+  void seek(uint64_t NewPos) {
+    if (Status != ErrCode::Value::IllegalPath) {
+      Pos = std::min(NewPos, Size);
+      LastPos = Pos;
+      Status = ErrCode::Value::Success;
     }
   }
 
-  /// Unset limit read section size.
-  void unsetSectionSize() { SecPos.reset(); }
-
   /// Reset status
   void reset() {
-    Status = ErrCode::UnexpectedEnd;
+    Status = ErrCode::Value::UnexpectedEnd;
     LastPos = 0;
     Pos = 0;
     Size = 0;
@@ -101,17 +129,13 @@ private:
   Expect<void> testRead(uint64_t Read);
 
   /// File manager status.
-  ErrCode Status = ErrCode::UnexpectedEnd;
+  ErrCode::Value Status = ErrCode::Value::UnexpectedEnd;
 
   /// Last succeeded read start or read failed offset.
   /// Will be set to the read error or EOF offset when read failed, or set to
   /// the u32, u64, s32, s64, f32, f64, name, or bytes start offset when read
   /// succeeded or syntax error.
   uint64_t LastPos;
-
-  /// Section limit offset. If a value is set, it will return an 'UnexpectedEnd'
-  /// if the read offset cross this value.
-  std::optional<uint64_t> SecPos;
 
   /// Current read offset.
   uint64_t Pos;

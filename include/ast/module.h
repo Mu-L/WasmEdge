@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/ast/module.h - Module class definition -------------------===//
 //
 // Part of the WasmEdge Project.
@@ -83,15 +85,22 @@ public:
     kTableInit,
     kElemDrop,
     kRefFunc,
+    kPtrFunc,
+    kMemoryAtomicNotify,
+    kMemoryAtomicWait,
     kIntrinsicMax,
   };
   using IntrinsicsTable = void * [uint32_t(Intrinsics::kIntrinsicMax)];
 
-  /// Getter and sette of compiled symbol.
+  /// Getter and setter of compiled symbol.
   const auto &getSymbol() const noexcept { return IntrSymbol; }
   void setSymbol(Symbol<const IntrinsicsTable *> S) noexcept {
     IntrSymbol = std::move(S);
   }
+
+  /// Getter and setter of validated flag.
+  bool getIsValidated() const noexcept { return IsValidated; }
+  void setIsValidated(bool V = true) noexcept { IsValidated = V; }
 
 private:
   /// \name Data of Module node.
@@ -121,6 +130,11 @@ private:
   /// @{
   AOTSection AOTSec;
   Symbol<const IntrinsicsTable *> IntrSymbol;
+  /// @}
+
+  /// \name Validated flag.
+  /// @{
+  bool IsValidated = false;
   /// @}
 };
 

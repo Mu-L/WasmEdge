@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/common/types.h - Types definition ------------------------===//
 //
 // Part of the WasmEdge Project.
@@ -12,7 +14,8 @@
 //===----------------------------------------------------------------------===//
 #pragma once
 
-#include "common/enum_types.h"
+#include "common/enum_types.hpp"
+#include "common/errcode.h"
 #include "common/int128.h"
 #include "common/variant.h"
 
@@ -24,12 +27,14 @@
 namespace WasmEdge {
 
 namespace {
+
 /// Remove const, reference, and volitile.
 template <typename T>
 using RemoveCVRefT = std::remove_cv_t<std::remove_reference_t<T>>;
+
 } // namespace
 
-/// >>>>>>>> Type definitions >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+// >>>>>>>> Type definitions >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 using Byte = uint8_t;
 
@@ -52,11 +57,16 @@ struct UnknownRef {
 };
 
 /// FuncRef definition.
+namespace Runtime::Instance {
+class FunctionInstance;
+}
 struct FuncRef {
-  uint32_t NotNull = 0;
-  uint32_t Idx = 0;
+#if __INTPTR_WIDTH__ == 32
+  const uint32_t Padding = -1;
+#endif
+  const Runtime::Instance::FunctionInstance *Ptr = nullptr;
   FuncRef() = default;
-  FuncRef(uint32_t I) : NotNull(1), Idx(I) {}
+  FuncRef(const Runtime::Instance::FunctionInstance *P) : Ptr(P) {}
 };
 
 /// ExternRef definition.
@@ -78,7 +88,32 @@ using ValVariant =
             FuncRef, ExternRef>;
 
 /// BlockType definition.
-using BlockType = std::variant<ValType, uint32_t>;
+struct BlockType {
+  enum class TypeEnum : uint8_t {
+    Empty,
+    ValType,
+    TypeIdx,
+  };
+  TypeEnum TypeFlag;
+  union {
+    ValType Type;
+    uint32_t Idx;
+  } Data;
+  BlockType() = default;
+  BlockType(ValType VType) { setData(VType); }
+  BlockType(uint32_t Idx) { setData(Idx); }
+  void setEmpty() { TypeFlag = TypeEnum::Empty; }
+  void setData(ValType VType) {
+    TypeFlag = TypeEnum::ValType;
+    Data.Type = VType;
+  }
+  void setData(uint32_t Idx) {
+    TypeFlag = TypeEnum::TypeIdx;
+    Data.Idx = Idx;
+  }
+  bool isEmpty() const { return TypeFlag == TypeEnum::Empty; }
+  bool isValType() const { return TypeFlag == TypeEnum::ValType; }
+};
 
 /// NumType and RefType conversions.
 inline constexpr ValType ToValType(const NumType Val) noexcept {
@@ -88,9 +123,9 @@ inline constexpr ValType ToValType(const RefType Val) noexcept {
   return static_cast<ValType>(Val);
 }
 
-/// <<<<<<<< Type definitions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+// <<<<<<<< Type definitions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-/// >>>>>>>> Const expressions to checking value types >>>>>>>>>>>>>>>>>>>>>>>>>
+// >>>>>>>> Const expressions to checking value types >>>>>>>>>>>>>>>>>>>>>>>>>>
 
 /// Return true if Wasm unsign (uint32_t and uint64_t).
 template <typename T>
@@ -186,9 +221,9 @@ toUnsigned(T Val) {
   return static_cast<MakeWasmUnsignedT<T>>(Val);
 }
 
-/// <<<<<<<< Const expressions to checking value types <<<<<<<<<<<<<<<<<<<<<<<<<
+// <<<<<<<< Const expressions to checking value types <<<<<<<<<<<<<<<<<<<<<<<<<<
 
-/// >>>>>>>> Template to get value type from type >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+// >>>>>>>> Template to get value type from type >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 template <typename T> inline ValType ValTypeFromType() noexcept;
 
@@ -223,9 +258,9 @@ template <> inline ValType ValTypeFromType<ExternRef>() noexcept {
   return ValType::ExternRef;
 }
 
-/// <<<<<<<< Template to get value type from type <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+// <<<<<<<< Template to get value type from type <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-/// >>>>>>>> Const expression to generate value from value type >>>>>>>>>>>>>>>>
+// >>>>>>>> Const expression to generate value from value type >>>>>>>>>>>>>>>>>
 
 inline constexpr ValVariant ValueFromType(ValType Type) noexcept {
   switch (Type) {
@@ -242,15 +277,14 @@ inline constexpr ValVariant ValueFromType(ValType Type) noexcept {
   case ValType::FuncRef:
   case ValType::ExternRef:
     return UnknownRef();
-  case ValType::None:
-    __builtin_unreachable();
+  default:
+    assumingUnreachable();
   }
-  __builtin_unreachable();
 }
 
-/// <<<<<<<< Const expression to generate value from value type <<<<<<<<<<<<<<<<
+// <<<<<<<< Const expression to generate value from value type <<<<<<<<<<<<<<<<<
 
-/// >>>>>>>> Functions to retrieve reference inners >>>>>>>>>>>>>>>>>>>>>>>>>>>>
+// >>>>>>>> Functions to retrieve reference inners >>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 inline constexpr bool isNullRef(const ValVariant &Val) {
   return Val.get<UnknownRef>().Value == 0;
@@ -258,15 +292,22 @@ inline constexpr bool isNullRef(const ValVariant &Val) {
 inline constexpr bool isNullRef(const RefVariant &Val) {
   return Val.get<UnknownRef>().Value == 0;
 }
-inline constexpr uint32_t retrieveFuncIdx(const ValVariant &Val) {
-  return Val.get<FuncRef>().Idx;
+
+inline const Runtime::Instance::FunctionInstance *
+retrieveFuncRef(const ValVariant &Val) {
+  return reinterpret_cast<const Runtime::Instance::FunctionInstance *>(
+      Val.get<FuncRef>().Ptr);
 }
-inline constexpr uint32_t retrieveFuncIdx(const RefVariant &Val) {
-  return Val.get<FuncRef>().Idx;
+inline const Runtime::Instance::FunctionInstance *
+retrieveFuncRef(const RefVariant &Val) {
+  return reinterpret_cast<const Runtime::Instance::FunctionInstance *>(
+      Val.get<FuncRef>().Ptr);
 }
-inline constexpr uint32_t retrieveFuncIdx(const FuncRef &Val) {
-  return Val.Idx;
+inline const Runtime::Instance::FunctionInstance *
+retrieveFuncRef(const FuncRef &Val) {
+  return reinterpret_cast<const Runtime::Instance::FunctionInstance *>(Val.Ptr);
 }
+
 template <typename T> inline T &retrieveExternRef(const ValVariant &Val) {
   return *reinterpret_cast<T *>(Val.get<ExternRef>().Ptr);
 }
@@ -277,6 +318,6 @@ template <typename T> inline T &retrieveExternRef(const ExternRef &Val) {
   return *reinterpret_cast<T *>(Val.Ptr);
 }
 
-/// <<<<<<<< Functions to retrieve reference inners <<<<<<<<<<<<<<<<<<<<<<<<<<<<
+// <<<<<<<< Functions to retrieve reference inners <<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 } // namespace WasmEdge

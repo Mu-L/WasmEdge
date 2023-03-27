@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
 
 #include "aot/cache.h"
 
@@ -6,8 +7,11 @@
 #include "common/config.h"
 #include "common/defines.h"
 #include "common/hexstr.h"
-#include "common/log.h"
 #include "system/path.h"
+
+#include <array>
+#include <string>
+#include <system_error>
 
 namespace WasmEdge {
 namespace AOT {
@@ -24,7 +28,7 @@ std::filesystem::path getRoot(Cache::StorageScope Scope) {
     return {};
   }
   default:
-    __builtin_unreachable();
+    assumingUnreachable();
   }
 }
 } // namespace

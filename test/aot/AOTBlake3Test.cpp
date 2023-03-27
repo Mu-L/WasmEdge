@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/test/aot/AOTBlake3Test.cpp - blake3 hash unit tests ------===//
 //
 // Part of the WasmEdge Project.
@@ -12,9 +14,13 @@
 
 #include "aot/blake3.h"
 
-#include "common/span.h"
-#include "gtest/gtest.h"
+#include "common/types.h"
+#include "experimental/span.hpp"
 
+#include <array>
+#include <cstddef>
+#include <gtest/gtest.h>
+#include <string_view>
 #include <vector>
 
 namespace {

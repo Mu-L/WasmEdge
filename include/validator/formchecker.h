@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/validator/formchecker.h - Form checking class definition -===//
 //
 // Part of the WasmEdge Project.
@@ -17,30 +19,27 @@
 #include "common/errcode.h"
 #include "common/span.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace WasmEdge {
 namespace Validator {
 
-enum class VType : uint8_t {
-  Unknown,
-  I32,
-  I64,
-  F32,
-  F64,
-  V128,
-  FuncRef,
-  ExternRef
-};
+typedef std::optional<ValType> VType;
+
+static inline constexpr VType unreachableVType() { return VType(); }
 
 static inline constexpr bool isNumType(const VType V) {
-  return V == VType::I32 || V == VType::I64 || V == VType::F32 ||
-         V == VType::F64 || V == VType::V128 || V == VType::Unknown;
+
+  return !V || *V == ValType::I32 || *V == ValType::I64 || *V == ValType::F32 ||
+         *V == ValType::F64 || *V == ValType::V128;
 }
 
 static inline constexpr bool isRefType(const VType V) {
-  return V == VType::FuncRef || V == VType::ExternRef || V == VType::Unknown;
+  return !V || *V == ValType::FuncRef || *V == ValType::ExternRef;
 }
 
 class FormChecker {
@@ -83,16 +82,19 @@ public:
     CtrlFrame() = default;
     CtrlFrame(struct CtrlFrame &&F)
         : StartTypes(std::move(F.StartTypes)), EndTypes(std::move(F.EndTypes)),
-          Height(F.Height), IsUnreachable(F.IsUnreachable), Code(F.Code) {}
+          Jump(F.Jump), Height(F.Height), IsUnreachable(F.IsUnreachable),
+          Code(F.Code) {}
     CtrlFrame(const struct CtrlFrame &F)
-        : StartTypes(F.StartTypes), EndTypes(F.EndTypes), Height(F.Height),
-          IsUnreachable(F.IsUnreachable), Code(F.Code) {}
-    CtrlFrame(Span<const VType> In, Span<const VType> Out, size_t H,
+        : StartTypes(F.StartTypes), EndTypes(F.EndTypes), Jump(F.Jump),
+          Height(F.Height), IsUnreachable(F.IsUnreachable), Code(F.Code) {}
+    CtrlFrame(Span<const VType> In, Span<const VType> Out,
+              const AST::Instruction *J, size_t H,
               OpCode Op = OpCode::Unreachable)
         : StartTypes(In.begin(), In.end()), EndTypes(Out.begin(), Out.end()),
-          Height(H), IsUnreachable(false), Code(Op) {}
+          Jump(J), Height(H), IsUnreachable(false), Code(Op) {}
     std::vector<VType> StartTypes;
     std::vector<VType> EndTypes;
+    const AST::Instruction *Jump;
     size_t Height;
     bool IsUnreachable;
     OpCode Code;
@@ -115,15 +117,12 @@ private:
   Expect<VType> popType(VType E);
   Expect<void> popTypes(Span<const VType> Input);
   void pushCtrl(Span<const VType> In, Span<const VType> Out,
+                const AST::Instruction *Jump,
                 OpCode Code = OpCode::Unreachable);
   Expect<CtrlFrame> popCtrl();
   Span<const VType> getLabelTypes(const CtrlFrame &F);
   Expect<void> unreachable();
   Expect<void> StackTrans(Span<const VType> Take, Span<const VType> Put);
-
-  /// Helper functions
-  Expect<std::pair<Span<const VType>, Span<const VType>>>
-  resolveBlockType(std::vector<VType> &Buffer, BlockType Type);
 
   /// Contexts.
   std::vector<std::pair<std::vector<VType>, std::vector<VType>>> Types;

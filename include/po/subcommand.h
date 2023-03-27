@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/po/subcommand.h - SubCommand -----------------------------===//
 //
 // Part of the WasmEdge Project.
@@ -9,7 +11,7 @@
 #include "po/helper.h"
 
 #include <string_view>
-#include <vector>
+#include <utility>
 
 namespace WasmEdge {
 namespace PO {

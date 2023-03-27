@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/po/helper.h - Helper for Initialize Option ---------------===//
 //
 // Part of the WasmEdge Project.
@@ -23,8 +25,7 @@ struct MetaVar {
 };
 
 template <typename T> struct DefaultValue {
-  DefaultValue(T Value) noexcept(std::is_nothrow_move_constructible_v<T>)
-      : Value(std::move(Value)) {}
+  DefaultValue(T Value) noexcept : Value(std::move(Value)) {}
   T Value;
 };
 

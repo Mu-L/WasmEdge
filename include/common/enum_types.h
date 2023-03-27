@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/common/enum_types.h - WASM types related enumerations ----===//
 //
 // Part of the WasmEdge Project.
@@ -13,115 +15,49 @@
 #ifndef WASMEDGE_C_API_ENUM_TYPES_H
 #define WASMEDGE_C_API_ENUM_TYPES_H
 
-#ifdef __cplusplus
-#include <cstdint>
-#include <string>
-#include <unordered_map>
-#endif
-
-/// WASM Value type enumeration.
-#ifdef __cplusplus
-namespace WasmEdge {
-enum class ValType : uint8_t {
-  None = 0x40,
-  I32 = 0x7F,
-  I64 = 0x7E,
-  F32 = 0x7D,
-  F64 = 0x7C,
-  V128 = 0x7B,
-  FuncRef = 0x70,
-  ExternRef = 0x6F
-};
-
-static inline std::unordered_map<ValType, std::string> ValTypeStr = {
-    {ValType::None, "none"},       {ValType::I32, "i32"},
-    {ValType::I64, "i64"},         {ValType::F32, "f32"},
-    {ValType::F64, "f64"},         {ValType::V128, "v128"},
-    {ValType::FuncRef, "funcref"}, {ValType::ExternRef, "externref"}};
-} // namespace WasmEdge
-#endif
-
+/// WASM Value type C enumeration.
 enum WasmEdge_ValType {
-  WasmEdge_ValType_I32 = 0x7FU,
-  WasmEdge_ValType_I64 = 0x7EU,
-  WasmEdge_ValType_F32 = 0x7DU,
-  WasmEdge_ValType_F64 = 0x7CU,
-  WasmEdge_ValType_V128 = 0x7BU,
-  WasmEdge_ValType_FuncRef = 0x70U,
-  WasmEdge_ValType_ExternRef = 0x6FU
+#define UseValType
+#define Line(NAME, VALUE, STRING) WasmEdge_ValType_##NAME = VALUE,
+#include "enum.inc"
+#undef Line
+#undef UseValType
 };
 
-/// WASM Number type enumeration.
-#ifdef __cplusplus
-namespace WasmEdge {
-enum class NumType : uint8_t {
-  I32 = 0x7F,
-  I64 = 0x7E,
-  F32 = 0x7D,
-  F64 = 0x7C,
-  V128 = 0x7B
-};
-} // namespace WasmEdge
-#endif
-
+/// WASM Number type C enumeration.
 enum WasmEdge_NumType {
-  WasmEdge_NumType_I32 = 0x7FU,
-  WasmEdge_NumType_I64 = 0x7EU,
-  WasmEdge_NumType_F32 = 0x7DU,
-  WasmEdge_NumType_F64 = 0x7CU,
-  WasmEdge_NumType_V128 = 0x7BU
+#define UseNumType
+#define Line(NAME, VALUE) WasmEdge_NumType_##NAME = VALUE,
+#include "enum.inc"
+#undef Line
+#undef UseNumType
 };
 
-/// WASM Reference type enumeration.
-#ifdef __cplusplus
-namespace WasmEdge {
-enum class RefType : uint8_t { ExternRef = 0x6F, FuncRef = 0x70 };
-} // namespace WasmEdge
-#endif
-
+/// WASM Reference type C enumeration.
 enum WasmEdge_RefType {
-  WasmEdge_RefType_FuncRef = 0x70U,
-  WasmEdge_RefType_ExternRef = 0x6FU
+#define UseRefType
+#define Line(NAME, VALUE) WasmEdge_RefType_##NAME = VALUE,
+#include "enum.inc"
+#undef Line
+#undef UseRefType
 };
 
-/// WASM Mutability enumeration.
-#ifdef __cplusplus
-namespace WasmEdge {
-enum class ValMut : uint8_t { Const = 0x00, Var = 0x01 };
-
-static inline std::unordered_map<ValMut, std::string> ValMutStr = {
-    {ValMut::Const, "const"}, {ValMut::Var, "var"}};
-} // namespace WasmEdge
-#endif
-
+/// WASM Mutability C enumeration.
 enum WasmEdge_Mutability {
-  WasmEdge_Mutability_Const = 0x00U,
-  WasmEdge_Mutability_Var = 0x01U
+#define UseValMut
+#define Line(NAME, VALUE, STRING) WasmEdge_Mutability_##NAME = VALUE,
+#include "enum.inc"
+#undef Line
+#undef UseValMut
 };
 
-/// WASM External type enumeration.
-#ifdef __cplusplus
-namespace WasmEdge {
-enum class ExternalType : uint8_t {
-  Function = 0x00U,
-  Table = 0x01U,
-  Memory = 0x02U,
-  Global = 0x03U
-};
-
-static inline std::unordered_map<ExternalType, std::string> ExternalTypeStr = {
-    {ExternalType::Function, "function"},
-    {ExternalType::Table, "table"},
-    {ExternalType::Memory, "memory"},
-    {ExternalType::Global, "global"}};
-} // namespace WasmEdge
-#endif
-
+/// WASM External type C enumeration.
 enum WasmEdge_ExternalType {
-  WasmEdge_ExternalType_Function = 0x00U,
-  WasmEdge_ExternalType_Table = 0x01U,
-  WasmEdge_ExternalType_Memory = 0x02U,
-  WasmEdge_ExternalType_Global = 0x03U
+#define UseExternalType
+#define Line(NAME, VALUE, STRING) WasmEdge_ExternalType_##NAME = VALUE,
+#include "enum.inc"
+#undef Line
+#undef UseExternalType
 };
 
-#endif /// WASMEDGE_C_API_ENUM_TYPES_H
+#endif // WASMEDGE_C_API_ENUM_TYPES_H

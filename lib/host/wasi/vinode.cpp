@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 #include "host/wasi/vinode.h"
 #include "common/errcode.h"
 #include "common/log.h"
 #include "host/wasi/environ.h"
 #include "host/wasi/vfs.h"
-#include <cassert>
+#include <algorithm>
+#include <cstddef>
 #include <numeric>
 #include <string>
 
@@ -319,6 +322,23 @@ WasiExpect<void> VINode::pathUnlinkFile(VFS &FS, std::shared_ptr<VINode> Fd,
   return Fd->Node.pathUnlinkFile(std::string(Path));
 }
 
+WasiExpect<void>
+VINode::getAddrinfo(std::string_view Node, std::string_view Service,
+                    const __wasi_addrinfo_t &Hint, uint32_t MaxResLength,
+                    Span<__wasi_addrinfo_t *> WasiAddrinfoArray,
+                    Span<__wasi_sockaddr_t *> WasiSockaddrArray,
+                    Span<char *> AiAddrSaDataArray,
+                    Span<char *> AiCanonnameArray,
+                    /*Out*/ __wasi_size_t &ResLength) noexcept {
+  if (auto Res = INode::getAddrinfo(
+          Node, Service, Hint, MaxResLength, WasiAddrinfoArray,
+          WasiSockaddrArray, AiAddrSaDataArray, AiCanonnameArray, ResLength);
+      unlikely(!Res)) {
+    return WasiUnexpect(Res);
+  }
+  return {};
+}
+
 WasiExpect<std::shared_ptr<VINode>>
 VINode::sockOpen(VFS &FS, __wasi_address_family_t SysDomain,
                  __wasi_sock_type_t SockType) {
@@ -329,20 +349,21 @@ VINode::sockOpen(VFS &FS, __wasi_address_family_t SysDomain,
         __WASI_RIGHTS_SOCK_OPEN | __WASI_RIGHTS_SOCK_CLOSE |
         __WASI_RIGHTS_SOCK_RECV | __WASI_RIGHTS_SOCK_RECV_FROM |
         __WASI_RIGHTS_SOCK_SEND | __WASI_RIGHTS_SOCK_SEND_TO |
-        __WASI_RIGHTS_SOCK_SHUTDOWN | __WASI_RIGHTS_SOCK_BIND;
-    return std::make_shared<VINode>(FS, std::move(*Res), Rights, Rights,
-                                    std::string(""s));
+        __WASI_RIGHTS_SOCK_SHUTDOWN | __WASI_RIGHTS_SOCK_BIND |
+        __WASI_RIGHTS_POLL_FD_READWRITE | __WASI_RIGHTS_FD_FDSTAT_SET_FLAGS;
+    return std::make_shared<VINode>(FS, std::move(*Res), Rights, Rights);
   }
 }
 
-WasiExpect<std::shared_ptr<VINode>> VINode::sockAccept(uint16_t Port) {
-  if (auto Res = Node.sockAccept(Port); unlikely(!Res)) {
+WasiExpect<std::shared_ptr<VINode>> VINode::sockAccept() {
+  if (auto Res = Node.sockAccept(); unlikely(!Res)) {
     return WasiUnexpect(Res);
   } else {
     __wasi_rights_t Rights =
         __WASI_RIGHTS_SOCK_RECV | __WASI_RIGHTS_SOCK_RECV_FROM |
         __WASI_RIGHTS_SOCK_SEND | __WASI_RIGHTS_SOCK_SEND_TO |
-        __WASI_RIGHTS_SOCK_SHUTDOWN;
+        __WASI_RIGHTS_SOCK_SHUTDOWN | __WASI_RIGHTS_POLL_FD_READWRITE |
+        __WASI_RIGHTS_FD_FDSTAT_SET_FLAGS;
     return std::make_shared<VINode>(FS, std::move(*Res), Rights, Rights,
                                     std::string());
   }

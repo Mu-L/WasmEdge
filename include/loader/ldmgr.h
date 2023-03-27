@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/loader/ldmgr.h - Loadable Manager definition -------------===//
 //
 // Part of the WasmEdge Project.
@@ -15,6 +17,7 @@
 #include "common/types.h"
 #include "loader/shared_library.h"
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 

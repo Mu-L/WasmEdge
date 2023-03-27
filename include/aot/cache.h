@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/aot/cache.h - Cache class definition ---------------------===//
 //
 // Part of the WasmEdge Project.
@@ -13,9 +15,9 @@
 
 #include "common/errcode.h"
 #include "common/filesystem.h"
+#include "common/span.h"
 #include "common/types.h"
 
-#include <cstdint>
 #include <string_view>
 
 namespace WasmEdge {

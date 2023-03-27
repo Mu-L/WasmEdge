@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/validator/validator.h - validator class definition -------===//
 //
 // Part of the WasmEdge Project.
@@ -16,6 +18,7 @@
 #include "common/configure.h"
 #include "validator/formchecker.h"
 
+#include <cstdint>
 #include <memory>
 
 namespace WasmEdge {

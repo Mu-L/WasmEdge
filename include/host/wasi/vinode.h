@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 #pragma once
 
 #include "common/filesystem.h"
 #include "host/wasi/error.h"
 #include "host/wasi/inode.h"
 
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
-#include <unordered_map>
-#include <variant>
+#include <utility>
 #include <vector>
 
 namespace WasmEdge {
@@ -18,6 +21,7 @@ namespace WASI {
 
 class VFS;
 class VPoller;
+class VEpoller;
 class VINode : public std::enable_shared_from_this<VINode> {
 public:
   VINode(const VINode &) = delete;
@@ -55,7 +59,7 @@ public:
                                                   std::string Name,
                                                   std::string SystemPath);
 
-  bool isPreopened() const { return !Parent; }
+  bool isPreopened() const { return !Parent && !Name.empty(); }
 
   constexpr const std::string &name() const { return Name; }
 
@@ -339,6 +343,16 @@ public:
     return Node.fdWrite(IOVs, NWritten);
   }
 
+  /// Get the native handler.
+  ///
+  /// Note: Users should cast this native handler to corresponding types
+  /// on different operating systems. E.g. int on POSIX or void * on Windows
+  ///
+  /// @return The native handler in uint64_t.
+  WasiExpect<uint64_t> getNativeHandler() const noexcept {
+    return Node.getNativeHandler();
+  }
+
   /// Create a directory.
   ///
   /// Note: This is similar to `mkdirat` in POSIX.
@@ -529,6 +543,23 @@ public:
   static inline WasiExpect<VPoller>
   pollOneoff(__wasi_size_t NSubscriptions) noexcept;
 
+  /// Concurrently poll for the occurrence of a set of events in edge-triggered
+  /// mode.
+  ///
+  /// @param[in] NSubscriptions Both the number of subscriptions and events.
+  /// @param[in] Fd Epoll Descriptor.
+  /// @return Poll helper or WASI error.
+  static inline WasiExpect<VEpoller> epollOneoff(__wasi_size_t NSubscriptions,
+                                                 int Fd) noexcept;
+
+  static WasiExpect<void>
+  getAddrinfo(std::string_view Node, std::string_view Service,
+              const __wasi_addrinfo_t &Hint, uint32_t MaxResLength,
+              Span<__wasi_addrinfo_t *> WasiAddrinfoArray,
+              Span<__wasi_sockaddr_t *> WasiSockaddrArray,
+              Span<char *> AiAddrSaDataArray, Span<char *> AiCanonnameArray,
+              /*Out*/ __wasi_size_t &ResLength) noexcept;
+
   static WasiExpect<std::shared_ptr<VINode>>
   sockOpen(VFS &FS, __wasi_address_family_t SysDomain,
            __wasi_sock_type_t SockType);
@@ -538,11 +569,11 @@ public:
     return Node.sockBind(Address, AddressLength, Port);
   }
 
-  WasiExpect<void> sockListen(uint32_t Backlog) noexcept {
+  WasiExpect<void> sockListen(int32_t Backlog) noexcept {
     return Node.sockListen(Backlog);
   }
 
-  WasiExpect<std::shared_ptr<VINode>> sockAccept(uint16_t Port);
+  WasiExpect<std::shared_ptr<VINode>> sockAccept();
 
   WasiExpect<void> sockConnect(uint8_t *Address, uint8_t AddressLength,
                                uint16_t Port) noexcept {
@@ -565,6 +596,27 @@ public:
     return Node.sockRecv(RiData, RiFlags, NRead, RoFlags);
   }
 
+  /// Receive a message from a socket.
+  ///
+  /// Note: This is similar to `recvfrom` in POSIX, though it also supports
+  /// reading the data into multiple buffers in the manner of `readv`.
+  ///
+  /// @param[in] RiData List of scatter/gather vectors to which to store data.
+  /// @param[in] RiFlags Message flags.
+  /// @param[in] Address Address of the target.
+  /// @param[in] AddressLength The buffer size of Address.
+  /// @param[out] NRead Return the number of bytes stored in RiData.
+  /// @param[out] RoFlags Return message flags.
+  /// @return Nothing or WASI error.
+  WasiExpect<void> sockRecvFrom(Span<Span<uint8_t>> RiData,
+                                __wasi_riflags_t RiFlags, uint8_t *Address,
+                                uint8_t AddressLength, uint32_t *PortPtr,
+                                __wasi_size_t &NRead,
+                                __wasi_roflags_t &RoFlags) const noexcept {
+    return Node.sockRecvFrom(RiData, RiFlags, Address, AddressLength, PortPtr,
+                             NRead, RoFlags);
+  }
+
   /// Send a message on a socket.
   ///
   /// Note: This is similar to `send` in POSIX, though it also supports writing
@@ -581,6 +633,26 @@ public:
     return Node.sockSend(SiData, SiFlags, NWritten);
   }
 
+  /// Send a message on a socket.
+  ///
+  /// Note: This is similar to `send` in POSIX, though it also supports writing
+  /// the data from multiple buffers in the manner of `writev`.
+  ///
+  /// @param[in] SiData List of scatter/gather vectors to which to retrieve
+  /// data.
+  /// @param[in] SiFlags Message flags.
+  /// @param[in] Address Address of the target.
+  /// @param[in] AddressLength The buffer size of Address.
+  /// @param[out] NWritten The number of bytes transmitted.
+  /// @return Nothing or WASI error
+  WasiExpect<void> sockSendTo(Span<Span<const uint8_t>> SiData,
+                              __wasi_siflags_t SiFlags, uint8_t *Address,
+                              uint8_t AddressLength, int32_t Port,
+                              __wasi_size_t &NWritten) const noexcept {
+    return Node.sockSendTo(SiData, SiFlags, Address, AddressLength, Port,
+                           NWritten);
+  }
+
   /// Shut down socket send and receive channels.
   ///
   /// Note: This is similar to `shutdown` in POSIX.
@@ -589,6 +661,28 @@ public:
   /// @return Nothing or WASI error
   WasiExpect<void> sockShutdown(__wasi_sdflags_t SdFlags) const noexcept {
     return Node.sockShutdown(SdFlags);
+  }
+
+  WasiExpect<void> sockGetOpt(__wasi_sock_opt_level_t SockOptLevel,
+                              __wasi_sock_opt_so_t SockOptName, void *FlagPtr,
+                              uint32_t *FlagSizePtr) const noexcept {
+    return Node.sockGetOpt(SockOptLevel, SockOptName, FlagPtr, FlagSizePtr);
+  }
+
+  WasiExpect<void> sockSetOpt(__wasi_sock_opt_level_t SockOptLevel,
+                              __wasi_sock_opt_so_t SockOptName, void *FlagPtr,
+                              uint32_t FlagSizePtr) const noexcept {
+    return Node.sockSetOpt(SockOptLevel, SockOptName, FlagPtr, FlagSizePtr);
+  }
+
+  WasiExpect<void> sockGetLocalAddr(uint8_t *Address,
+                                    uint32_t *PortPtr) const noexcept {
+    return Node.sockGetLocalAddr(Address, PortPtr);
+  }
+
+  WasiExpect<void> sockGetPeerAddr(uint8_t *Address,
+                                   uint32_t *PortPtr) const noexcept {
+    return Node.sockGetPeerAddr(Address, PortPtr);
   }
 
   __wasi_rights_t fsRightsBase() const noexcept { return FsRightsBase; }
@@ -634,6 +728,7 @@ private:
   std::string Name;
 
   friend class VPoller;
+  friend class VEpoller;
 
   /// Open path without resolve.
   /// @param Path Path, contains one element only.
@@ -667,7 +762,8 @@ public:
 
   WasiExpect<void> read(std::shared_ptr<VINode> Fd,
                         __wasi_userdata_t UserData) noexcept {
-    if (!Fd->can(__WASI_RIGHTS_POLL_FD_READWRITE | __WASI_RIGHTS_FD_READ)) {
+    if (!Fd->can(__WASI_RIGHTS_POLL_FD_READWRITE) &&
+        !Fd->can(__WASI_RIGHTS_FD_READ)) {
       return WasiUnexpect(__WASI_ERRNO_NOTCAPABLE);
     }
     return Poller::read(Fd->Node, UserData);
@@ -679,10 +775,49 @@ public:
   }
 };
 
+class VEpoller : private Epoller {
+public:
+  using Epoller::CallbackType;
+  using Epoller::clock;
+  using Epoller::getFd;
+  using Epoller::wait;
+
+  VEpoller(Epoller &&P) : Epoller(std::move(P)) {}
+
+  WasiExpect<void>
+  read(std::shared_ptr<VINode> Fd, __wasi_userdata_t UserData,
+       std::unordered_map<int, uint32_t> &Registration) noexcept {
+    if (!Fd->can(__WASI_RIGHTS_POLL_FD_READWRITE) &&
+        !Fd->can(__WASI_RIGHTS_FD_READ)) {
+      return WasiUnexpect(__WASI_ERRNO_NOTCAPABLE);
+    }
+    return Epoller::read(Fd->Node, UserData, Registration);
+  }
+
+  WasiExpect<void>
+  write(std::shared_ptr<VINode> Fd, __wasi_userdata_t UserData,
+        std::unordered_map<int, uint32_t> &Registration) noexcept {
+    return Epoller::write(Fd->Node, UserData, Registration);
+  }
+  WasiExpect<void>
+  wait(CallbackType Callback,
+       std::unordered_map<int, uint32_t> &Registration) noexcept {
+    return Epoller::wait(Callback, Registration);
+  }
+  int getFd() noexcept { return Epoller::getFd(); }
+};
+
 inline WasiExpect<VPoller>
 VINode::pollOneoff(__wasi_size_t NSubscriptions) noexcept {
   return INode::pollOneoff(NSubscriptions).map([](Poller &&P) {
     return VPoller(std::move(P));
+  });
+}
+
+inline WasiExpect<VEpoller> VINode::epollOneoff(__wasi_size_t NSubscriptions,
+                                                int Fd) noexcept {
+  return INode::epollOneoff(NSubscriptions, Fd).map([](Epoller &&P) {
+    return VEpoller(std::move(P));
   });
 }
 

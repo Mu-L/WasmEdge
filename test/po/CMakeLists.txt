@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2019-2022 Second State INC
 
 wasmedge_add_executable(poTests
   gtest.cpp
@@ -11,6 +12,7 @@ add_test(poTests poTests)
 
 target_link_libraries(poTests
   PRIVATE
+  wasmedgePO
   ${GTEST_BOTH_LIBRARIES}
 )
 

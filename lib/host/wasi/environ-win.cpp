@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 #include "common/defines.h"
 #if WASMEDGE_OS_WINDOWS
 
 #include "common/errcode.h"
 #include "host/wasi/environ.h"
 #include "win.h"
+#include <csignal>
 
 namespace WasmEdge {
 namespace Host {

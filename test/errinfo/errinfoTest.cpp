@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
 
 #include "common/errinfo.h"
 
-#include "gtest/gtest.h"
-
+#include <cstdint>
+#include <gtest/gtest.h>
 #include <iostream>
 #include <vector>
 
@@ -100,7 +101,7 @@ TEST(ErrInfoTest, Info__Mismatch) {
       {WasmEdge::ValType::I64, WasmEdge::ValType::F64},
       {WasmEdge::ValType::F64, WasmEdge::ValType::ExternRef,
        WasmEdge::ValType::V128},
-      {WasmEdge::ValType::None, WasmEdge::ValType::V128});
+      {WasmEdge::ValType::V128});
   std::cout << Info6 << std::endl;
   WasmEdge::ErrInfo::InfoMismatch Info7(WasmEdge::RefType::ExternRef, true, 10,
                                         20, WasmEdge::RefType::FuncRef, true,
@@ -125,11 +126,14 @@ TEST(ErrInfoTest, Info__Mismatch) {
 }
 
 TEST(ErrInfoTest, Info__Instruction) {
-  std::vector<WasmEdge::ValVariant> Args = {0, 1000, WasmEdge::FuncRef(100)};
-  WasmEdge::ErrInfo::InfoInstruction Info1(WasmEdge::OpCode::Block, 255, Args,
-                                           {WasmEdge::ValType::None,
-                                            WasmEdge::ValType::None,
-                                            WasmEdge::ValType::None});
+  std::vector<WasmEdge::ValVariant> Args = {
+      0, 1000,
+      WasmEdge::FuncRef(
+          reinterpret_cast<WasmEdge::Runtime::Instance::FunctionInstance *>(
+              100))};
+  WasmEdge::ErrInfo::InfoInstruction Info1(
+      WasmEdge::OpCode::Block, 255, Args,
+      {WasmEdge::ValType::I32, WasmEdge::ValType::I32, WasmEdge::ValType::I32});
   std::cout << Info1 << std::endl;
   WasmEdge::ErrInfo::InfoInstruction Info2(
       WasmEdge::OpCode::Block, 255, Args,

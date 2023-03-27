@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/common/log.h - Logging system ----------------------------===//
 //
 // Part of the WasmEdge Project.
@@ -18,7 +20,13 @@
 namespace WasmEdge {
 namespace Log {
 
+void setLogOff();
+
 void setDebugLoggingLevel();
+
+void setInfoLoggingLevel();
+
+void setWarnLoggingLevel();
 
 void setErrorLoggingLevel();
 

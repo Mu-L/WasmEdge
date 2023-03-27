@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/runtime/instance/data.h - Data Instance definition -------===//
 //
 // Part of the WasmEdge Project.
@@ -23,7 +25,7 @@ namespace Instance {
 class DataInstance {
 public:
   DataInstance() = delete;
-  DataInstance(const uint32_t Offset, Span<const Byte> Init)
+  DataInstance(const uint32_t Offset, Span<const Byte> Init) noexcept
       : Off(Offset), Data(Init.begin(), Init.end()) {}
 
   /// Get offset in data instance.

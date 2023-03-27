@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 #include "host/wasi/environ.h"
 #include "common/errcode.h"
 #include "common/log.h"
 #include "host/wasi/vfs.h"
 #include "host/wasi/vinode.h"
-#include <random>
 
 using namespace std::literals;
 
@@ -51,28 +52,28 @@ static inline constexpr const __wasi_rights_t kNoInheritingRights =
 void Environ::init(Span<const std::string> Dirs, std::string ProgramName,
                    Span<const std::string> Args, Span<const std::string> Envs) {
   {
-    /// Open dir for WASI environment.
+    // Open dir for WASI environment.
     std::vector<std::shared_ptr<VINode>> PreopenedDirs;
     PreopenedDirs.reserve(Dirs.size());
     for (const auto &Dir : Dirs) {
       const auto Pos = Dir.find(':');
-      if (Pos != std::string::npos) {
-        const auto HostDir = Dir.substr(Pos + 1);
-        auto GuestDir =
-            VINode::canonicalGuest(std::string_view(Dir).substr(0, Pos));
-        if (GuestDir.size() == 0) {
-          GuestDir = '/';
-        }
-        if (auto Res =
-                VINode::bind(FS, kReadRights | kWriteRights | kCreateRights,
-                             kReadRights | kWriteRights | kCreateRights,
-                             std::move(GuestDir), std::move(HostDir));
-            unlikely(!Res)) {
-          spdlog::error("Bind guest directory failed:{}", Res.error());
-          continue;
-        } else {
-          PreopenedDirs.emplace_back(std::move(*Res));
-        }
+      std::string HostDir =
+          (Pos == std::string::npos) ? Dir : Dir.substr(Pos + 1);
+      std::string GuestDir = VINode::canonicalGuest(
+          (Pos == std::string::npos) ? std::string_view(Dir)
+                                     : std::string_view(Dir).substr(0, Pos));
+      if (GuestDir.size() == 0) {
+        GuestDir = '/';
+      }
+      if (auto Res =
+              VINode::bind(FS, kReadRights | kWriteRights | kCreateRights,
+                           kReadRights | kWriteRights | kCreateRights,
+                           std::move(GuestDir), std::move(HostDir));
+          unlikely(!Res)) {
+        spdlog::error("Bind guest directory failed:{}", Res.error());
+        continue;
+      } else {
+        PreopenedDirs.emplace_back(std::move(*Res));
       }
     }
 
@@ -107,6 +108,13 @@ void Environ::fini() noexcept {
   EnvironVariables.clear();
   Arguments.clear();
   FdMap.clear();
+  Registration.clear();
+#if WASMEDGE_OS_LINUX || WASMEDGE_OS_MACOS
+  if (RegistrationFd >= 0) {
+    close(RegistrationFd);
+    RegistrationFd = -1;
+  }
+#endif
 }
 
 Environ::~Environ() noexcept { fini(); }

@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/loader/shared_library.h - Shared library definition ------===//
 //
 // Part of the WasmEdge Project.
@@ -18,7 +20,9 @@
 #include "common/filesystem.h"
 #include "common/symbol.h"
 
+#include <cstdint>
 #include <memory>
+#include <vector>
 
 #if WASMEDGE_OS_WINDOWS
 #include <boost/winapi/dll.hpp>
@@ -55,14 +59,11 @@ public:
   uintptr_t getOffset() const noexcept;
 
   template <typename T> T *getPointer(uint64_t Address) const noexcept {
-    if (unlikely(Address == 0)) {
-      return nullptr;
-    }
     return reinterpret_cast<T *>(getOffset() + Address);
   }
 
   template <typename T> Symbol<T> getIntrinsics() noexcept {
-    if (Binary && IntrinsicsAddress != 0) {
+    if (Binary) {
       return Symbol<T>(shared_from_this(), getPointer<T>(IntrinsicsAddress));
     }
     return {};

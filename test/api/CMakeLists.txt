@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2019-2022 Second State INC
 
 if(WASMEDGE_BUILD_AOT_RUNTIME)
   add_definitions(-DWASMEDGE_BUILD_AOT_RUNTIME)
+endif()
+if(WASMEDGE_BUILD_PLUGINS)
+  add_definitions(-DWASMEDGE_BUILD_PLUGINS)
 endif()
 
 file(COPY
@@ -16,8 +20,9 @@ wasmedge_add_library(wasmedgeAPITestHelpers
 )
 
 target_link_libraries(wasmedgeAPITestHelpers
-  PUBLIC
-  wasmedge_c_shared
+  PRIVATE
+  wasmedge_shared
+  wasmedgeTestSpec
 )
 
 wasmedge_add_executable(wasmedgeAPIUnitTests
@@ -31,7 +36,12 @@ target_link_libraries(wasmedgeAPIUnitTests
   std::filesystem
   ${GTEST_BOTH_LIBRARIES}
   wasmedgeAPITestHelpers
-  wasmedge_c_shared
+  wasmedge_shared
+)
+
+target_include_directories(wasmedgeAPIUnitTests
+  PRIVATE
+  ${CMAKE_SOURCE_DIR}/include
 )
 
 wasmedge_add_executable(wasmedgeAPIVMCoreTests
@@ -46,7 +56,7 @@ target_link_libraries(wasmedgeAPIVMCoreTests
   ${GTEST_BOTH_LIBRARIES}
   wasmedgeTestSpec
   wasmedgeAPITestHelpers
-  wasmedge_c_shared
+  wasmedge_shared
 )
 
 wasmedge_add_executable(wasmedgeAPIStepsCoreTests
@@ -61,7 +71,7 @@ target_link_libraries(wasmedgeAPIStepsCoreTests
   ${GTEST_BOTH_LIBRARIES}
   wasmedgeTestSpec
   wasmedgeAPITestHelpers
-  wasmedge_c_shared
+  wasmedge_shared
 )
 
 if (WASMEDGE_BUILD_AOT_RUNTIME)
@@ -77,6 +87,6 @@ if (WASMEDGE_BUILD_AOT_RUNTIME)
     ${GTEST_BOTH_LIBRARIES}
     wasmedgeTestSpec
     wasmedgeAPITestHelpers
-    wasmedge_c_shared
+    wasmedge_shared
   )
 endif()

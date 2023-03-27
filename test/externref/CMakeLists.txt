@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2019-2022 Second State INC
 
 wasmedge_add_executable(wasmedgeExternrefTests
   ExternrefTest.cpp
@@ -15,5 +16,6 @@ file(COPY
 target_link_libraries(wasmedgeExternrefTests
   PRIVATE
   ${GTEST_BOTH_LIBRARIES}
-  wasmedgeVM
+  std::filesystem
+  wasmedge_shared
 )

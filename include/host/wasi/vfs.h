@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 #pragma once
 
 #include "common/filesystem.h"
 #include "host/wasi/error.h"
 
-#include <memory>
-#include <string>
+#include <cstdint>
 
 namespace WasmEdge {
 namespace Host {

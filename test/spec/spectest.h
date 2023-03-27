@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/test/spec/spectest.h - Wasm test suites ------------------===//
 //
 // Part of the WasmEdge Project.
@@ -20,7 +22,10 @@
 #include "common/types.h"
 
 #include <functional>
+#include <string>
 #include <string_view>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 namespace WasmEdge {
@@ -47,10 +52,12 @@ public:
   std::vector<std::string> enumerate() const;
   std::tuple<std::string_view, WasmEdge::Configure, std::string>
   resolve(std::string_view Params) const;
-  bool compare(const std::vector<std::pair<std::string, std::string>> &Expected,
-               const std::vector<ValVariant> &Got) const;
-  bool stringContains(const std::string &Expected,
-                      const std::string &Got) const;
+  bool compare(const std::pair<std::string, std::string> &Expected,
+               const std::pair<ValVariant, ValType> &Got) const;
+  bool
+  compares(const std::vector<std::pair<std::string, std::string>> &Expected,
+           const std::vector<std::pair<ValVariant, ValType>> &Got) const;
+  bool stringContains(std::string_view Expected, std::string_view Got) const;
 
   void run(std::string_view Proposal, std::string_view UnitName);
 
@@ -67,13 +74,13 @@ public:
   using InstantiateCallback = Expect<void>(const std::string &Filename);
   std::function<InstantiateCallback> onInstantiate;
 
-  using InvokeCallback = Expect<std::vector<ValVariant>>(
+  using InvokeCallback = Expect<std::vector<std::pair<ValVariant, ValType>>>(
       const std::string &ModName, const std::string &Field,
       const std::vector<ValVariant> &Params,
       const std::vector<ValType> &ParamTypes);
   std::function<InvokeCallback> onInvoke;
 
-  using GetCallback = Expect<std::vector<ValVariant>>(
+  using GetCallback = Expect<std::pair<ValVariant, ValType>>(
       const std::string &ModName, const std::string &Field);
   std::function<GetCallback> onGet;
 

@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/common/timer.h - Timer class definition ------------------===//
 //
 // Part of the WasmEdge Project.
@@ -11,11 +13,14 @@
 //===----------------------------------------------------------------------===//
 #pragma once
 
+#include "errcode.h"
+
 #include <array>
-#include <cassert>
 #include <chrono>
-#include <optional>
+#include <shared_mutex>
 #include <string>
+#include <thread>
+#include <unordered_map>
 
 namespace WasmEdge {
 namespace Timer {
@@ -26,48 +31,60 @@ class Timer {
 public:
   using Clock = std::chrono::steady_clock;
 
-  constexpr Timer() noexcept { reset(); }
+  Timer() noexcept { unsafeReset(); }
 
   void startRecord(const TimerTag TT) noexcept {
-    assert(TT < TimerTag::Max);
-    const uint32_t Index = uint32_t(TT);
-    StartTime[Index].emplace(Clock::now());
+    assuming(TT < TimerTag::Max);
+    std::unique_lock Lock(Mutex);
+    const uint32_t Index = static_cast<uint32_t>(TT);
+    StartTime[Index].emplace(std::this_thread::get_id(), Clock::now());
   }
 
   void stopRecord(const TimerTag TT) noexcept {
-    assert(TT < TimerTag::Max);
-    const uint32_t Index = uint32_t(TT);
-    if (auto &Start = StartTime[Index]) {
-      const auto Diff = Clock::now() - *Start;
+    assuming(TT < TimerTag::Max);
+    std::unique_lock Lock(Mutex);
+    const uint32_t Index = static_cast<uint32_t>(TT);
+    auto &Map = StartTime[Index];
+    if (auto Iter = Map.find(std::this_thread::get_id()); Iter != Map.end()) {
+      const auto Diff = Clock::now() - Iter->second;
       RecTime[Index] += Diff;
-      Start.reset();
+      Map.erase(Iter);
     }
   }
 
   void clearRecord(const TimerTag TT) noexcept {
-    assert(TT < TimerTag::Max);
-    const uint32_t Index = uint32_t(TT);
-    StartTime[Index].reset();
+    assuming(TT < TimerTag::Max);
+    std::unique_lock Lock(Mutex);
+    const uint32_t Index = static_cast<uint32_t>(TT);
+    StartTime[Index].clear();
     RecTime[Index] = Clock::duration::zero();
   }
 
-  constexpr Clock::duration getRecord(const TimerTag TT) const noexcept {
-    assert(TT < TimerTag::Max);
-    const uint32_t Index = uint32_t(TT);
+  Clock::duration getRecord(const TimerTag TT) const noexcept {
+    assuming(TT < TimerTag::Max);
+    std::shared_lock Lock(Mutex);
+    const uint32_t Index = static_cast<uint32_t>(TT);
     return RecTime[Index];
   }
 
-  constexpr void reset() noexcept {
+  void reset() noexcept {
+    std::unique_lock Lock(Mutex);
+    unsafeReset();
+  }
+
+private:
+  void unsafeReset() noexcept {
     for (auto &Start : StartTime) {
-      Start.reset();
+      Start.clear();
     }
     for (auto &Rec : RecTime) {
       Rec = Clock::duration::zero();
     }
   }
 
-private:
-  std::array<std::optional<Clock::time_point>, uint32_t(TimerTag::Max)>
+  mutable std::shared_mutex Mutex;
+  std::array<std::unordered_map<std::thread::id, Clock::time_point>,
+             uint32_t(TimerTag::Max)>
       StartTime{};
   std::array<Clock::duration, uint32_t(TimerTag::Max)> RecTime{};
 };

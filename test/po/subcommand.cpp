@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
 
 #include "po/subcommand.h"
-#include "experimental/span.hpp"
 #include "po/argument_parser.h"
-#include "po/list.h"
 #include "po/option.h"
-#include "gtest/gtest.h"
-#include <numeric>
+#include <array>
+#include <gtest/gtest.h>
 #include <vector>
 
 using namespace WasmEdge::PO;
@@ -21,7 +20,7 @@ TEST(SubCommands, Simple1) {
       .begin_subcommand(S2, "s2"sv)
       .end_subcommand();
   std::array Args = {"test"};
-  EXPECT_TRUE(Parser.parse(Args.size(), Args.data()));
+  EXPECT_TRUE(Parser.parse(stdout, Args.size(), Args.data()));
   EXPECT_FALSE(S1.is_selected());
   EXPECT_FALSE(S2.is_selected());
 }
@@ -35,7 +34,7 @@ TEST(SubCommands, Simple2) {
       .begin_subcommand(S2, "s2"sv)
       .end_subcommand();
   std::array Args = {"test", "s1"};
-  EXPECT_TRUE(Parser.parse(Args.size(), Args.data()));
+  EXPECT_TRUE(Parser.parse(stdout, Args.size(), Args.data()));
   EXPECT_TRUE(S1.is_selected());
   EXPECT_FALSE(S2.is_selected());
 }
@@ -49,7 +48,7 @@ TEST(SubCommands, Simple3) {
       .begin_subcommand(S2, "s2"sv)
       .end_subcommand();
   std::array Args = {"test", "s2"};
-  EXPECT_TRUE(Parser.parse(Args.size(), Args.data()));
+  EXPECT_TRUE(Parser.parse(stdout, Args.size(), Args.data()));
   EXPECT_FALSE(S1.is_selected());
   EXPECT_TRUE(S2.is_selected());
 }
@@ -63,7 +62,7 @@ TEST(SubCommands, Simple4) {
       .begin_subcommand(S2, "s2"sv)
       .end_subcommand();
   std::array Args = {"test", "s1", "s2"};
-  EXPECT_FALSE(Parser.parse(Args.size(), Args.data()));
+  EXPECT_FALSE(Parser.parse(stdout, Args.size(), Args.data()));
 }
 
 TEST(SubCommands, Nested1) {
@@ -75,7 +74,7 @@ TEST(SubCommands, Nested1) {
       .end_subcommand()
       .end_subcommand();
   std::array Args = {"test", "s1", "s2"};
-  EXPECT_TRUE(Parser.parse(Args.size(), Args.data()));
+  EXPECT_TRUE(Parser.parse(stdout, Args.size(), Args.data()));
   EXPECT_TRUE(S1.is_selected());
   EXPECT_TRUE(S2.is_selected());
 }
@@ -89,7 +88,7 @@ TEST(SubCommands, Nested2) {
       .end_subcommand()
       .end_subcommand();
   std::array Args = {"test", "s1"};
-  EXPECT_TRUE(Parser.parse(Args.size(), Args.data()));
+  EXPECT_TRUE(Parser.parse(stdout, Args.size(), Args.data()));
   EXPECT_TRUE(S1.is_selected());
   EXPECT_FALSE(S2.is_selected());
 }
@@ -103,7 +102,7 @@ TEST(SubCommands, Nested3) {
       .end_subcommand()
       .end_subcommand();
   std::array Args = {"test", "s2"};
-  EXPECT_FALSE(Parser.parse(Args.size(), Args.data()));
+  EXPECT_FALSE(Parser.parse(stdout, Args.size(), Args.data()));
 }
 
 TEST(SubCommands, NestedOption1) {
@@ -121,7 +120,7 @@ TEST(SubCommands, NestedOption1) {
       .end_subcommand()
       .end_subcommand();
   std::array Args = {"test", "--t1", "s1"};
-  EXPECT_TRUE(Parser.parse(Args.size(), Args.data()));
+  EXPECT_TRUE(Parser.parse(stdout, Args.size(), Args.data()));
   EXPECT_TRUE(T1.value());
   EXPECT_FALSE(T2.value());
   EXPECT_FALSE(T3.value());
@@ -143,7 +142,7 @@ TEST(SubCommands, NestedOption2) {
       .end_subcommand()
       .end_subcommand();
   std::array Args = {"test", "s1", "--t1"};
-  EXPECT_FALSE(Parser.parse(Args.size(), Args.data()));
+  EXPECT_FALSE(Parser.parse(stdout, Args.size(), Args.data()));
 }
 
 TEST(SubCommands, NestedOption3) {
@@ -161,7 +160,7 @@ TEST(SubCommands, NestedOption3) {
       .end_subcommand()
       .end_subcommand();
   std::array Args = {"test", "s1"};
-  EXPECT_TRUE(Parser.parse(Args.size(), Args.data()));
+  EXPECT_TRUE(Parser.parse(stdout, Args.size(), Args.data()));
   EXPECT_FALSE(T1.value());
   EXPECT_FALSE(T2.value());
   EXPECT_FALSE(T3.value());
@@ -183,7 +182,7 @@ TEST(SubCommands, NestedOption4) {
       .end_subcommand()
       .end_subcommand();
   std::array Args = {"test", "s1", "--t2"};
-  EXPECT_TRUE(Parser.parse(Args.size(), Args.data()));
+  EXPECT_TRUE(Parser.parse(stdout, Args.size(), Args.data()));
   EXPECT_FALSE(T1.value());
   EXPECT_TRUE(T2.value());
   EXPECT_FALSE(T3.value());
@@ -205,7 +204,7 @@ TEST(SubCommands, NestedOption5) {
       .end_subcommand()
       .end_subcommand();
   std::array Args = {"test", "--t1", "s1", "--t2"};
-  EXPECT_TRUE(Parser.parse(Args.size(), Args.data()));
+  EXPECT_TRUE(Parser.parse(stdout, Args.size(), Args.data()));
   EXPECT_TRUE(T1.value());
   EXPECT_TRUE(T2.value());
   EXPECT_FALSE(T3.value());

@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2022 Second State INC
+
 //===-- wasmedge/test/aot/AOTcoreTest.cpp - Wasm test suites --------------===//
 //
 // Part of the WasmEdge Project.
@@ -19,20 +21,19 @@
 
 #include "../spec/hostfunc.h"
 #include "../spec/spectest.h"
-#include "gtest/gtest.h"
 
-#include <fstream>
+#include <array>
+#include <chrono>
+#include <cstdint>
+#include <functional>
+#include <gtest/gtest.h>
+#include <map>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
-
-#if WASMEDGE_OS_LINUX
-#define EXTENSION ".so"sv
-#elif WASMEDGE_OS_MACOS
-#define EXTENSION ".dylib"sv
-#elif WASMEDGE_OS_WINDOWS
-#define EXTENSION ".dll"sv
-#endif
 
 namespace {
 
@@ -40,7 +41,7 @@ using namespace std::literals;
 using namespace WasmEdge;
 static SpecTest T(std::filesystem::u8path("../spec/testSuites"sv));
 
-/// Parameterized testing class.
+// Parameterized testing class.
 class NativeCoreTest : public testing::TestWithParam<std::string> {};
 class CustomWasmCoreTest : public testing::TestWithParam<std::string> {};
 
@@ -54,15 +55,22 @@ TEST_P(NativeCoreTest, TestSuites) {
     WasmEdge::Configure CopyConf = Conf;
     WasmEdge::Loader::Loader Loader(Conf);
     WasmEdge::Validator::Validator ValidatorEngine(Conf);
+    CopyConf.getCompilerConfigure().setOutputFormat(
+        CompilerConfigure::OutputFormat::Native);
     CopyConf.getCompilerConfigure().setOptimizationLevel(
         WasmEdge::CompilerConfigure::OptimizationLevel::O0);
     CopyConf.getCompilerConfigure().setDumpIR(true);
     WasmEdge::AOT::Compiler Compiler(CopyConf);
     auto Path = std::filesystem::u8path(Filename);
-    Path.replace_extension(std::filesystem::u8path(EXTENSION));
+    Path.replace_extension(std::filesystem::u8path(WASMEDGE_LIB_EXTENSION));
     const auto SOPath = Path.u8string();
     auto Data = *Loader.loadFile(Filename);
-    auto Module = *Loader.parseModule(Data);
+    std::unique_ptr<WasmEdge::AST::Module> Module;
+    if (auto Res = Loader.parseModule(Data)) {
+      Module = std::move(*Res);
+    } else {
+      return Unexpect(Res);
+    }
     if (auto Res = ValidatorEngine.validate(*Module); !Res) {
       return Unexpect(Res);
     }
@@ -103,46 +111,43 @@ TEST_P(NativeCoreTest, TestSuites) {
         .and_then([&VM]() { return VM.validate(); })
         .and_then([&VM]() { return VM.instantiate(); });
   };
-  /// Helper function to call functions.
+  // Helper function to call functions.
   T.onInvoke = [&VM](const std::string &ModName, const std::string &Field,
                      const std::vector<ValVariant> &Params,
                      const std::vector<ValType> &ParamTypes)
-      -> Expect<std::vector<ValVariant>> {
+      -> Expect<std::vector<std::pair<ValVariant, ValType>>> {
     if (!ModName.empty()) {
-      /// Invoke function of named module. Named modules are registered in
-      /// Store Manager.
+      // Invoke function of named module. Named modules are registered in Store
+      // Manager.
       return VM.execute(ModName, Field, Params, ParamTypes);
     } else {
-      /// Invoke function of anonymous module. Anonymous modules are
-      /// instantiated in VM.
+      // Invoke function of anonymous module. Anonymous modules are instantiated
+      // in VM.
       return VM.execute(Field, Params, ParamTypes);
     }
   };
-  /// Helper function to get values.
-  T.onGet = [&VM](const std::string &ModName,
-                  const std::string &Field) -> Expect<std::vector<ValVariant>> {
-    /// Get module instance.
-    auto &Store = VM.getStoreManager();
-    WasmEdge::Runtime::Instance::ModuleInstance *ModInst = nullptr;
+  // Helper function to get values.
+  T.onGet = [&VM](const std::string &ModName, const std::string &Field)
+      -> Expect<std::pair<ValVariant, ValType>> {
+    // Get module instance.
+    const WasmEdge::Runtime::Instance::ModuleInstance *ModInst = nullptr;
     if (ModName.empty()) {
-      ModInst = *Store.getActiveModule();
+      ModInst = VM.getActiveModule();
     } else {
-      if (auto Res = Store.findModule(ModName)) {
-        ModInst = *Res;
-      } else {
-        return Unexpect(Res);
-      }
+      ModInst = VM.getStoreManager().findModule(ModName);
+    }
+    if (ModInst == nullptr) {
+      return Unexpect(ErrCode::Value::WrongInstanceAddress);
     }
 
-    /// Get global instance.
-    auto &Globs = ModInst->getGlobalExports();
-    if (Globs.find(Field) == Globs.cend()) {
-      return Unexpect(ErrCode::IncompatibleImportType);
+    // Get global instance.
+    WasmEdge::Runtime::Instance::GlobalInstance *GlobInst =
+        ModInst->findGlobalExports(Field);
+    if (unlikely(GlobInst == nullptr)) {
+      return Unexpect(ErrCode::Value::WrongInstanceAddress);
     }
-    uint32_t GlobAddr = Globs.find(Field)->second;
-    auto *GlobInst = *Store.getGlobal(GlobAddr);
-
-    return std::vector<WasmEdge::ValVariant>{GlobInst->getValue()};
+    return std::make_pair(GlobInst->getValue(),
+                          GlobInst->getGlobalType().getValType());
   };
 
   T.run(Proposal, UnitName);
@@ -156,8 +161,6 @@ TEST_P(CustomWasmCoreTest, TestSuites) {
   auto Compile = [&, Conf = std::cref(Conf)](
                      const std::string &Filename) -> Expect<std::string> {
     WasmEdge::Configure CopyConf = Conf;
-    CopyConf.getCompilerConfigure().setOutputFormat(
-        CompilerConfigure::OutputFormat::Wasm);
     WasmEdge::Loader::Loader Loader(Conf);
     WasmEdge::Validator::Validator ValidatorEngine(Conf);
     CopyConf.getCompilerConfigure().setOptimizationLevel(
@@ -168,7 +171,12 @@ TEST_P(CustomWasmCoreTest, TestSuites) {
     Path.replace_extension(std::filesystem::u8path(".aot.wasm"));
     const auto SOPath = Path.u8string();
     auto Data = *Loader.loadFile(Filename);
-    auto Module = *Loader.parseModule(Data);
+    std::unique_ptr<WasmEdge::AST::Module> Module;
+    if (auto Res = Loader.parseModule(Data)) {
+      Module = std::move(*Res);
+    } else {
+      return Unexpect(Res);
+    }
     if (auto Res = ValidatorEngine.validate(*Module); !Res) {
       return Unexpect(Res);
     }
@@ -209,56 +217,228 @@ TEST_P(CustomWasmCoreTest, TestSuites) {
         .and_then([&VM]() { return VM.validate(); })
         .and_then([&VM]() { return VM.instantiate(); });
   };
-  /// Helper function to call functions.
+  // Helper function to call functions.
   T.onInvoke = [&VM](const std::string &ModName, const std::string &Field,
                      const std::vector<ValVariant> &Params,
                      const std::vector<ValType> &ParamTypes)
-      -> Expect<std::vector<ValVariant>> {
+      -> Expect<std::vector<std::pair<ValVariant, ValType>>> {
     if (!ModName.empty()) {
-      /// Invoke function of named module. Named modules are registered in
-      /// Store Manager.
+      // Invoke function of named module. Named modules are registered in Store
+      // Manager.
       return VM.execute(ModName, Field, Params, ParamTypes);
     } else {
-      /// Invoke function of anonymous module. Anonymous modules are
-      /// instantiated in VM.
+      // Invoke function of anonymous module. Anonymous modules are instantiated
+      // in VM.
       return VM.execute(Field, Params, ParamTypes);
     }
   };
-  /// Helper function to get values.
-  T.onGet = [&VM](const std::string &ModName,
-                  const std::string &Field) -> Expect<std::vector<ValVariant>> {
-    /// Get module instance.
-    auto &Store = VM.getStoreManager();
-    WasmEdge::Runtime::Instance::ModuleInstance *ModInst = nullptr;
+  // Helper function to get values.
+  T.onGet = [&VM](const std::string &ModName, const std::string &Field)
+      -> Expect<std::pair<ValVariant, ValType>> {
+    // Get module instance.
+    const WasmEdge::Runtime::Instance::ModuleInstance *ModInst = nullptr;
     if (ModName.empty()) {
-      ModInst = *Store.getActiveModule();
+      ModInst = VM.getActiveModule();
     } else {
-      if (auto Res = Store.findModule(ModName)) {
-        ModInst = *Res;
-      } else {
-        return Unexpect(Res);
-      }
+      ModInst = VM.getStoreManager().findModule(ModName);
+    }
+    if (ModInst == nullptr) {
+      return Unexpect(ErrCode::Value::WrongInstanceAddress);
     }
 
-    /// Get global instance.
-    auto &Globs = ModInst->getGlobalExports();
-    if (Globs.find(Field) == Globs.cend()) {
-      return Unexpect(ErrCode::IncompatibleImportType);
+    // Get global instance.
+    WasmEdge::Runtime::Instance::GlobalInstance *GlobInst =
+        ModInst->findGlobalExports(Field);
+    if (unlikely(GlobInst == nullptr)) {
+      return Unexpect(ErrCode::Value::WrongInstanceAddress);
     }
-    uint32_t GlobAddr = Globs.find(Field)->second;
-    auto *GlobInst = *Store.getGlobal(GlobAddr);
-
-    return std::vector<WasmEdge::ValVariant>{GlobInst->getValue()};
+    return std::make_pair(GlobInst->getValue(),
+                          GlobInst->getGlobalType().getValType());
   };
 
   T.run(Proposal, UnitName);
 }
 
-/// Initiate test suite.
+// Initiate test suite.
 INSTANTIATE_TEST_SUITE_P(TestUnit, NativeCoreTest,
                          testing::ValuesIn(T.enumerate()));
 INSTANTIATE_TEST_SUITE_P(TestUnit, CustomWasmCoreTest,
                          testing::ValuesIn(T.enumerate()));
+
+TEST(AsyncRunWsmFile, NativeInterruptTest) {
+  WasmEdge::Configure Conf;
+  Conf.getCompilerConfigure().setInterruptible(true);
+  Conf.getCompilerConfigure().setOutputFormat(
+      CompilerConfigure::OutputFormat::Native);
+
+  WasmEdge::VM::VM VM(Conf);
+  std::array<WasmEdge::Byte, 46> Wasm{
+      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60,
+      0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07,
+      0x0a, 0x01, 0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00, 0x00, 0x0a,
+      0x09, 0x01, 0x07, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b};
+  WasmEdge::Loader::Loader Loader(Conf);
+  WasmEdge::Validator::Validator ValidatorEngine(Conf);
+  WasmEdge::AOT::Compiler Compiler(Conf);
+  auto Path = std::filesystem::temp_directory_path() /
+              std::filesystem::u8path("AOTcoreTest" WASMEDGE_LIB_EXTENSION);
+  auto Module = *Loader.parseModule(Wasm);
+  ASSERT_TRUE(ValidatorEngine.validate(*Module));
+  ASSERT_TRUE(Compiler.compile(Wasm, *Module, Path));
+  {
+    auto Timeout =
+        std::chrono::system_clock::now() + std::chrono::milliseconds(1);
+    auto AsyncResult = VM.asyncRunWasmFile(Path, "_start");
+    EXPECT_FALSE(AsyncResult.waitUntil(Timeout));
+    AsyncResult.cancel();
+    auto Result = AsyncResult.get();
+    EXPECT_FALSE(Result);
+    EXPECT_EQ(Result.error(), WasmEdge::ErrCode::Value::Interrupted);
+  }
+  {
+    auto Timeout = std::chrono::milliseconds(1);
+    auto AsyncResult = VM.asyncRunWasmFile(Path, "_start");
+    EXPECT_FALSE(AsyncResult.waitFor(Timeout));
+    AsyncResult.cancel();
+    auto Result = AsyncResult.get();
+    EXPECT_FALSE(Result);
+    EXPECT_EQ(Result.error(), WasmEdge::ErrCode::Value::Interrupted);
+  }
+  std::filesystem::remove(Path);
+}
+
+TEST(AsyncExecute, NativeInterruptTest) {
+  WasmEdge::Configure Conf;
+  Conf.getCompilerConfigure().setInterruptible(true);
+  Conf.getCompilerConfigure().setOutputFormat(
+      CompilerConfigure::OutputFormat::Native);
+
+  WasmEdge::VM::VM VM(Conf);
+  std::array<WasmEdge::Byte, 46> Wasm{
+      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60,
+      0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07,
+      0x0a, 0x01, 0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00, 0x00, 0x0a,
+      0x09, 0x01, 0x07, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b};
+  WasmEdge::Loader::Loader Loader(Conf);
+  WasmEdge::Validator::Validator ValidatorEngine(Conf);
+  WasmEdge::AOT::Compiler Compiler(Conf);
+  auto Path = std::filesystem::temp_directory_path() /
+              std::filesystem::u8path("AOTcoreTest" WASMEDGE_LIB_EXTENSION);
+  auto Module = *Loader.parseModule(Wasm);
+  ASSERT_TRUE(ValidatorEngine.validate(*Module));
+  ASSERT_TRUE(Compiler.compile(Wasm, *Module, Path));
+  ASSERT_TRUE(VM.loadWasm(Path));
+  ASSERT_TRUE(VM.validate());
+  ASSERT_TRUE(VM.instantiate());
+  {
+    auto Timeout =
+        std::chrono::system_clock::now() + std::chrono::milliseconds(1);
+    auto AsyncResult = VM.asyncExecute("_start");
+    EXPECT_FALSE(AsyncResult.waitUntil(Timeout));
+    AsyncResult.cancel();
+    auto Result = AsyncResult.get();
+    EXPECT_FALSE(Result);
+    EXPECT_EQ(Result.error(), WasmEdge::ErrCode::Value::Interrupted);
+  }
+  {
+    auto Timeout = std::chrono::milliseconds(1);
+    auto AsyncResult = VM.asyncExecute("_start");
+    EXPECT_FALSE(AsyncResult.waitFor(Timeout));
+    AsyncResult.cancel();
+    auto Result = AsyncResult.get();
+    EXPECT_FALSE(Result);
+    EXPECT_EQ(Result.error(), WasmEdge::ErrCode::Value::Interrupted);
+  }
+  std::filesystem::remove(Path);
+}
+
+TEST(AsyncRunWsmFile, CustomWasmInterruptTest) {
+  WasmEdge::Configure Conf;
+  Conf.getCompilerConfigure().setInterruptible(true);
+  Conf.getCompilerConfigure().setOutputFormat(
+      CompilerConfigure::OutputFormat::Wasm);
+
+  WasmEdge::VM::VM VM(Conf);
+  std::array<WasmEdge::Byte, 46> Wasm{
+      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60,
+      0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07,
+      0x0a, 0x01, 0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00, 0x00, 0x0a,
+      0x09, 0x01, 0x07, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b};
+  WasmEdge::Loader::Loader Loader(Conf);
+  WasmEdge::Validator::Validator ValidatorEngine(Conf);
+  WasmEdge::AOT::Compiler Compiler(Conf);
+  auto Path = std::filesystem::temp_directory_path() /
+              std::filesystem::u8path("AOTcoreTest.aot.wasm");
+  auto Module = *Loader.parseModule(Wasm);
+  ASSERT_TRUE(ValidatorEngine.validate(*Module));
+  ASSERT_TRUE(Compiler.compile(Wasm, *Module, Path));
+  {
+    auto Timeout =
+        std::chrono::system_clock::now() + std::chrono::milliseconds(1);
+    auto AsyncResult = VM.asyncRunWasmFile(Path, "_start");
+    EXPECT_FALSE(AsyncResult.waitUntil(Timeout));
+    AsyncResult.cancel();
+    auto Result = AsyncResult.get();
+    EXPECT_FALSE(Result);
+    EXPECT_EQ(Result.error(), WasmEdge::ErrCode::Value::Interrupted);
+  }
+  {
+    auto Timeout = std::chrono::milliseconds(1);
+    auto AsyncResult = VM.asyncRunWasmFile(Path, "_start");
+    EXPECT_FALSE(AsyncResult.waitFor(Timeout));
+    AsyncResult.cancel();
+    auto Result = AsyncResult.get();
+    EXPECT_FALSE(Result);
+    EXPECT_EQ(Result.error(), WasmEdge::ErrCode::Value::Interrupted);
+  }
+  std::filesystem::remove(Path);
+}
+
+TEST(AsyncExecute, CustomWasmInterruptTest) {
+  WasmEdge::Configure Conf;
+  Conf.getCompilerConfigure().setInterruptible(true);
+  Conf.getCompilerConfigure().setOutputFormat(
+      CompilerConfigure::OutputFormat::Wasm);
+
+  WasmEdge::VM::VM VM(Conf);
+  std::array<WasmEdge::Byte, 46> Wasm{
+      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60,
+      0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07,
+      0x0a, 0x01, 0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00, 0x00, 0x0a,
+      0x09, 0x01, 0x07, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b};
+  WasmEdge::Loader::Loader Loader(Conf);
+  WasmEdge::Validator::Validator ValidatorEngine(Conf);
+  WasmEdge::AOT::Compiler Compiler(Conf);
+  auto Path = std::filesystem::temp_directory_path() /
+              std::filesystem::u8path("AOTcoreTest.aot.wasm");
+  auto Module = *Loader.parseModule(Wasm);
+  ASSERT_TRUE(ValidatorEngine.validate(*Module));
+  ASSERT_TRUE(Compiler.compile(Wasm, *Module, Path));
+  ASSERT_TRUE(VM.loadWasm(Path));
+  ASSERT_TRUE(VM.validate());
+  ASSERT_TRUE(VM.instantiate());
+  {
+    auto Timeout =
+        std::chrono::system_clock::now() + std::chrono::milliseconds(1);
+    auto AsyncResult = VM.asyncExecute("_start");
+    EXPECT_FALSE(AsyncResult.waitUntil(Timeout));
+    AsyncResult.cancel();
+    auto Result = AsyncResult.get();
+    EXPECT_FALSE(Result);
+    EXPECT_EQ(Result.error(), WasmEdge::ErrCode::Value::Interrupted);
+  }
+  {
+    auto Timeout = std::chrono::milliseconds(1);
+    auto AsyncResult = VM.asyncExecute("_start");
+    EXPECT_FALSE(AsyncResult.waitFor(Timeout));
+    AsyncResult.cancel();
+    auto Result = AsyncResult.get();
+    EXPECT_FALSE(Result);
+    EXPECT_EQ(Result.error(), WasmEdge::ErrCode::Value::Interrupted);
+  }
+  std::filesystem::remove(Path);
+}
+
 } // namespace
 
 GTEST_API_ int main(int argc, char **argv) {
