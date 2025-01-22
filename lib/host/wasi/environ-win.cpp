@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2024 Second State INC
+
 #include "common/defines.h"
 #if WASMEDGE_OS_WINDOWS
 
 #include "common/errcode.h"
 #include "host/wasi/environ.h"
 #include "win.h"
+#include <csignal>
+
+using namespace WasmEdge::winapi;
 
 namespace WasmEdge {
 namespace Host {
@@ -68,7 +73,7 @@ WasiExpect<void> Environ::procRaise(__wasi_signal_t Signal) const noexcept {
 }
 
 WasiExpect<void> Environ::schedYield() const noexcept {
-  boost::winapi::SwitchToThread();
+  SwitchToThread();
   return {};
 }
 

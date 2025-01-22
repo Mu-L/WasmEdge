@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2024 Second State INC
+
 //===-- wasmedge/common/symbol.h - Symbol definition ----------------------===//
 //
 // Part of the WasmEdge Project.
@@ -14,19 +16,16 @@
 
 #include <memory>
 
-namespace WasmEdge::Loader {
-class SharedLibrary;
-}
-
 namespace WasmEdge {
+class Executable;
 
 /// Holder class for library symbol
 template <typename T = void> class Symbol {
 private:
-  friend class Loader::SharedLibrary;
+  friend class Executable;
   template <typename> friend class Symbol;
 
-  Symbol(std::shared_ptr<Loader::SharedLibrary> H, T *S) noexcept
+  Symbol(std::shared_ptr<const Executable> H, T *S) noexcept
       : Library(std::move(H)), Pointer(S) {}
 
 public:
@@ -55,16 +54,16 @@ public:
   }
 
 private:
-  std::shared_ptr<Loader::SharedLibrary> Library;
+  std::shared_ptr<const Executable> Library;
   T *Pointer = nullptr;
 };
 
 template <typename T> class Symbol<T[]> {
 private:
-  friend class Loader::SharedLibrary;
+  friend class Executable;
   template <typename> friend class Symbol;
 
-  Symbol(std::shared_ptr<Loader::SharedLibrary> H, T (*S)[]) noexcept
+  Symbol(std::shared_ptr<const Executable> H, T (*S)[]) noexcept
       : Library(std::move(H)), Pointer(*S) {}
 
 public:
@@ -86,7 +85,7 @@ public:
   }
 
 private:
-  std::shared_ptr<Loader::SharedLibrary> Library;
+  std::shared_ptr<const Executable> Library;
   T *Pointer = nullptr;
 };
 

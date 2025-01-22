@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
-#include "gtest/gtest.h"
 #include <experimental/expected.hpp>
+#include <gtest/gtest.h>
+#include <memory>
+#include <type_traits>
+#include <utility>
 
 using cxx20::expected;
 using cxx20::unexpect;
@@ -545,7 +548,7 @@ TEST(ExtensionsTest, OrElse) {
     EXPECT_EQ(ret.error(), 21);
   }
 }
-struct S {
+struct E {
   int x;
 };
 
@@ -554,7 +557,7 @@ struct F {
 };
 
 TEST(ExtensionsTest, Issue14) {
-  auto res = expected<S, F>{unexpect, F{}};
+  auto res = expected<E, F>{unexpect, F{}};
 
   res.map_error([](F) {});
 }

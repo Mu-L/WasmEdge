@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2024 Second State INC
+
 #pragma once
 
 #include "common/defines.h"
 #include "common/errcode.h"
+#include "common/hash.h"
 #include "common/span.h"
 #include "host/wasi/clock.h"
 #include "host/wasi/error.h"
@@ -10,14 +13,17 @@
 #include "host/wasi/vinode.h"
 #include "wasi/api.hpp"
 
-#include <csignal>
+#include <algorithm>
+#include <array>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <shared_mutex>
 #include <string>
-#include <thread>
+#include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace WasmEdge {
@@ -26,10 +32,27 @@ namespace WASI {
 
 inline namespace detail {
 inline constexpr const int32_t kIOVMax = 1024;
+// Large enough to store SaData in sockaddr_in6
+// = sizeof(sockaddr_in6) - sizeof(sockaddr_in6::sin6_family)
+inline constexpr const int32_t kMaxSaDataLen = 26;
 } // namespace detail
 
+struct WasiAddrStorage {
+  uint16_t AddressFamily;
+  uint8_t Address[128 - sizeof(uint16_t)];
+  __wasi_address_family_t getAddressFamily() const noexcept {
+    return static_cast<__wasi_address_family_t>(AddressFamily);
+  }
+  void setAddressFamily(__wasi_address_family_t AddrFamily) noexcept {
+    AddressFamily = static_cast<uint16_t>(AddrFamily);
+  }
+  Span<uint8_t> getAddress() noexcept { return Address; }
+  Span<const uint8_t> getAddress() const noexcept { return Address; }
+};
+static_assert(sizeof(WasiAddrStorage) == 128, "wrong size");
+
 class EVPoller;
-class Environ {
+class Environ : public PollerContext {
 public:
   ~Environ() noexcept;
 
@@ -37,6 +60,24 @@ public:
             Span<const std::string> Args, Span<const std::string> Envs);
 
   void fini() noexcept;
+
+  WasiExpect<void> getAddrInfo(std::string_view Node, std::string_view Service,
+                               const __wasi_addrinfo_t &Hint,
+                               uint32_t MaxResLength,
+                               Span<__wasi_addrinfo_t *> WasiAddrinfoArray,
+                               Span<__wasi_sockaddr_t *> WasiSockaddrArray,
+                               Span<char *> AiAddrSaDataArray,
+                               Span<char *> AiCanonnameArray,
+                               /*Out*/ __wasi_size_t &ResLength) {
+
+    if (auto Res = VINode::getAddrinfo(
+            Node, Service, Hint, MaxResLength, WasiAddrinfoArray,
+            WasiSockaddrArray, AiAddrSaDataArray, AiCanonnameArray, ResLength);
+        unlikely(!Res)) {
+      return WasiUnexpect(Res);
+    }
+    return {};
+  }
 
   constexpr const std::vector<std::string> &getArguments() const noexcept {
     return Arguments;
@@ -61,14 +102,17 @@ public:
   WasiExpect<void> argsGet(Span<uint8_t_ptr> Argv,
                            Span<uint8_t> ArgvBuffer) const noexcept {
     for (const auto &Argument : Arguments) {
-      const __wasi_size_t Size =
-          static_cast<__wasi_size_t>(Argument.size()) + UINT32_C(1);
+      const __wasi_size_t Size = static_cast<__wasi_size_t>(Argument.size());
       std::copy_n(Argument.begin(), Size, ArgvBuffer.begin());
-      ArgvBuffer = ArgvBuffer.subspan(Size);
-      Argv[1] = Argv[0] + Size;
+      ArgvBuffer[Size] = '\0';
+      ArgvBuffer = ArgvBuffer.subspan(Size + UINT32_C(1));
+      if (Argv.size() > 1) {
+        Argv[1] = Argv[0] + Size + UINT32_C(1);
+      }
       Argv = Argv.subspan(1);
     }
-    Argv[0] = 0;
+    assert(ArgvBuffer.empty());
+    assert(Argv.empty());
 
     return {};
   }
@@ -104,13 +148,17 @@ public:
                               Span<uint8_t> EnvBuffer) const noexcept {
     for (const auto &EnvironVariable : EnvironVariables) {
       const __wasi_size_t Size =
-          static_cast<__wasi_size_t>(EnvironVariable.size()) + UINT32_C(1);
+          static_cast<__wasi_size_t>(EnvironVariable.size());
       std::copy_n(EnvironVariable.begin(), Size, EnvBuffer.begin());
-      EnvBuffer = EnvBuffer.subspan(Size);
-      Env[1] = Env[0] + Size;
+      EnvBuffer[Size] = '\0';
+      EnvBuffer = EnvBuffer.subspan(Size + UINT32_C(1));
+      if (Env.size() > 1) {
+        Env[1] = Env[0] + Size + UINT32_C(1);
+      }
       Env = Env.subspan(1);
     }
-    Env[0] = 0;
+    assert(EnvBuffer.empty());
+    assert(Env.empty());
 
     return {};
   }
@@ -204,12 +252,11 @@ public:
   ///
   /// @return Nothing or WASI error
   WasiExpect<void> fdClose(__wasi_fd_t Fd) noexcept {
-    std::unique_lock<std::shared_mutex> lock(FdMutex);
+    std::unique_lock Lock(FdMutex);
     if (auto It = FdMap.find(Fd); It == FdMap.end()) {
       return WasiUnexpect(__WASI_ERRNO_BADF);
-    } else if (It->second->isPreopened()) {
-      return WasiUnexpect(__WASI_ERRNO_NOTSUP);
     } else {
+      close(It->second);
       FdMap.erase(It);
       return {};
     }
@@ -387,9 +434,10 @@ public:
     } else {
       if (const auto &Path = Node->name(); Path.empty()) {
         return WasiUnexpect(__WASI_ERRNO_INVAL);
+      } else if (Buffer.size() < Path.size()) {
+        return WasiUnexpect(__WASI_ERRNO_NAMETOOLONG);
       } else {
-        std::copy_n(Path.begin(), std::min(Path.size(), Buffer.size()),
-                    Buffer.begin());
+        std::copy_n(Path.begin(), Path.size(), Buffer.begin());
       }
     }
     return {};
@@ -477,13 +525,13 @@ public:
   /// @param[in] To The file descriptor to overwrite.
   /// @return Nothing or WASI error
   WasiExpect<void> fdRenumber(__wasi_fd_t Fd, __wasi_fd_t To) noexcept {
-    std::unique_lock<std::shared_mutex> lock(FdMutex);
+    std::unique_lock Lock(FdMutex);
     if (auto It = FdMap.find(Fd); It == FdMap.end()) {
       return WasiUnexpect(__WASI_ERRNO_BADF);
+    } else if (Fd == To) {
+      return {};
     } else if (auto It2 = FdMap.find(To); It2 == FdMap.end()) {
       return WasiUnexpect(__WASI_ERRNO_BADF);
-    } else if (It2->second->isPreopened()) {
-      return WasiUnexpect(__WASI_ERRNO_NOTSUP);
     } else {
       FdMap.erase(It2);
       auto Node = FdMap.extract(It);
@@ -571,8 +619,11 @@ public:
   /// @param[in] Path The path at which to create the directory.
   /// @return Nothing or WASI error
   WasiExpect<void> pathCreateDirectory(__wasi_fd_t Fd, std::string_view Path) {
+    if (!VINode::isPathValid(Path)) {
+      return WasiUnexpect(__WASI_ERRNO_INVAL);
+    }
     auto Node = getNodeOrNull(Fd);
-    return VINode::pathCreateDirectory(FS, std::move(Node), Path);
+    return VINode::pathCreateDirectory(std::move(Node), Path);
   }
 
   /// Return the attributes of a file or directory.
@@ -588,8 +639,11 @@ public:
   WasiExpect<void> pathFilestatGet(__wasi_fd_t Fd, std::string_view Path,
                                    __wasi_lookupflags_t Flags,
                                    __wasi_filestat_t &Filestat) {
+    if (!VINode::isPathValid(Path)) {
+      return WasiUnexpect(__WASI_ERRNO_INVAL);
+    }
     auto Node = getNodeOrNull(Fd);
-    return VINode::pathFilestatGet(FS, std::move(Node), Path, Flags, Filestat);
+    return VINode::pathFilestatGet(std::move(Node), Path, Flags, Filestat);
   }
 
   /// Adjust the timestamps of a file or directory.
@@ -609,8 +663,11 @@ public:
                                         __wasi_timestamp_t ATim,
                                         __wasi_timestamp_t MTim,
                                         __wasi_fstflags_t FstFlags) {
+    if (!VINode::isPathValid(Path)) {
+      return WasiUnexpect(__WASI_ERRNO_INVAL);
+    }
     auto Node = getNodeOrNull(Fd);
-    return VINode::pathFilestatSetTimes(FS, std::move(Node), Path, Flags, ATim,
+    return VINode::pathFilestatSetTimes(std::move(Node), Path, Flags, ATim,
                                         MTim, FstFlags);
   }
 
@@ -630,9 +687,15 @@ public:
   WasiExpect<void> pathLink(__wasi_fd_t Old, std::string_view OldPath,
                             __wasi_fd_t New, std::string_view NewPath,
                             __wasi_lookupflags_t LookupFlags) {
+    if (!VINode::isPathValid(OldPath)) {
+      return WasiUnexpect(__WASI_ERRNO_INVAL);
+    }
+    if (!VINode::isPathValid(NewPath)) {
+      return WasiUnexpect(__WASI_ERRNO_INVAL);
+    }
     auto OldNode = getNodeOrNull(Old);
     auto NewNode = getNodeOrNull(New);
-    return VINode::pathLink(FS, std::move(OldNode), OldPath, std::move(NewNode),
+    return VINode::pathLink(std::move(OldNode), OldPath, std::move(NewNode),
                             NewPath, LookupFlags);
   }
 
@@ -672,9 +735,12 @@ public:
                                    __wasi_rights_t FsRightsBase,
                                    __wasi_rights_t FsRightsInheriting,
                                    __wasi_fdflags_t FdFlags) {
+    if (!VINode::isPathValid(Path)) {
+      return WasiUnexpect(__WASI_ERRNO_INVAL);
+    }
     auto Node = getNodeOrNull(Fd);
     if (auto Res =
-            VINode::pathOpen(FS, std::move(Node), Path, LookupFlags, OpenFlags,
+            VINode::pathOpen(std::move(Node), Path, LookupFlags, OpenFlags,
                              FsRightsBase, FsRightsInheriting, FdFlags);
         unlikely(!Res)) {
       return WasiUnexpect(Res);
@@ -698,8 +764,11 @@ public:
   /// @return Nothing or WASI error.
   WasiExpect<void> pathReadlink(__wasi_fd_t Fd, std::string_view Path,
                                 Span<char> Buffer, __wasi_size_t &NRead) {
+    if (!VINode::isPathValid(Path)) {
+      return WasiUnexpect(__WASI_ERRNO_INVAL);
+    }
     auto Node = getNodeOrNull(Fd);
-    return VINode::pathReadlink(FS, std::move(Node), Path, Buffer, NRead);
+    return VINode::pathReadlink(std::move(Node), Path, Buffer, NRead);
   }
 
   /// Remove a directory.
@@ -713,8 +782,11 @@ public:
   /// @param[in] Path The path to a directory to remove.
   /// @return Nothing or WASI error.
   WasiExpect<void> pathRemoveDirectory(__wasi_fd_t Fd, std::string_view Path) {
+    if (!VINode::isPathValid(Path)) {
+      return WasiUnexpect(__WASI_ERRNO_INVAL);
+    }
     auto Node = getNodeOrNull(Fd);
-    return VINode::pathRemoveDirectory(FS, std::move(Node), Path);
+    return VINode::pathRemoveDirectory(std::move(Node), Path);
   }
 
   /// Rename a file or directory.
@@ -731,10 +803,16 @@ public:
   /// @return Nothing or WASI error.
   WasiExpect<void> pathRename(__wasi_fd_t Old, std::string_view OldPath,
                               __wasi_fd_t New, std::string_view NewPath) {
+    if (!VINode::isPathValid(OldPath)) {
+      return WasiUnexpect(__WASI_ERRNO_INVAL);
+    }
+    if (!VINode::isPathValid(NewPath)) {
+      return WasiUnexpect(__WASI_ERRNO_INVAL);
+    }
     auto OldNode = getNodeOrNull(Old);
     auto NewNode = getNodeOrNull(New);
-    return VINode::pathRename(FS, std::move(OldNode), OldPath,
-                              std::move(NewNode), NewPath);
+    return VINode::pathRename(std::move(OldNode), OldPath, std::move(NewNode),
+                              NewPath);
   }
 
   /// Create a symbolic link.
@@ -749,8 +827,18 @@ public:
   /// @return Nothing or WASI error
   WasiExpect<void> pathSymlink(std::string_view OldPath, __wasi_fd_t New,
                                std::string_view NewPath) {
+    if (!VINode::isPathValid(OldPath)) {
+      return WasiUnexpect(__WASI_ERRNO_INVAL);
+    }
+    if (!VINode::isPathValid(NewPath)) {
+      return WasiUnexpect(__WASI_ERRNO_INVAL);
+    }
+    // forbid absolute path
+    if (!OldPath.empty() && OldPath[0] == '/') {
+      return WasiUnexpect(__WASI_ERRNO_INVAL);
+    }
     auto NewNode = getNodeOrNull(New);
-    return VINode::pathSymlink(FS, OldPath, std::move(NewNode), NewPath);
+    return VINode::pathSymlink(OldPath, std::move(NewNode), NewPath);
   }
 
   /// Unlink a file.
@@ -764,15 +852,29 @@ public:
   /// @param[in] Path The path to a file to unlink.
   /// @return Nothing or WASI error.
   WasiExpect<void> pathUnlinkFile(__wasi_fd_t Fd, std::string_view Path) {
+    if (!VINode::isPathValid(Path)) {
+      return WasiUnexpect(__WASI_ERRNO_INVAL);
+    }
     auto Node = getNodeOrNull(Fd);
-    return VINode::pathUnlinkFile(FS, std::move(Node), Path);
+    return VINode::pathUnlinkFile(std::move(Node), Path);
   }
 
-  /// Concurrently poll for the occurrence of a set of events.
+  /// Acquire a Poller for concurrently poll for the occurrence of a set of
+  /// events.
   ///
-  /// @param[in] NSubscriptions Both the number of subscriptions and events.
+  /// @param[in] Events The output buffer for events.
   /// @return Poll helper or WASI error.
-  WasiExpect<EVPoller> pollOneoff(__wasi_size_t NSubscriptions) noexcept;
+  WasiExpect<EVPoller> acquirePoller(Span<__wasi_event_t> Events) noexcept;
+
+  /// Release a used Poller object.
+  ///
+  /// @param[in] Poller Used poller object.
+  void releasePoller(EVPoller &&Poller) noexcept;
+
+  /// Close unused Fd in Pollers.
+  ///
+  /// @param[in] Node The Node to be deleted.
+  void close(std::shared_ptr<VINode> Node) noexcept;
 
   /// Terminate the process normally. An exit code of 0 indicates successful
   /// termination of the program. The meanings of other values is dependent on
@@ -808,12 +910,10 @@ public:
   /// @param[out] Buffer The buffer to fill with random data.
   /// @return Nothing or WASI error
   WasiExpect<void> randomGet(Span<uint8_t> Buffer) const noexcept {
-    std::random_device Device;
-    std::default_random_engine Engine(Device());
     std::uniform_int_distribution<uint32_t> Distribution;
     auto BufferSpan = cxx20::as_writable_bytes(Buffer);
     while (!BufferSpan.empty()) {
-      const uint32_t Value = Distribution(Engine);
+      const uint32_t Value = Distribution(Hash::RandEngine);
       const auto ValueSpan =
           cxx20::as_bytes(cxx20::span<const uint32_t, 1>(&Value, 1));
       const auto Size = std::min(BufferSpan.size(), ValueSpan.size());
@@ -828,8 +928,7 @@ public:
                                    __wasi_sock_type_t SockType) noexcept {
 
     std::shared_ptr<VINode> Node;
-    if (auto Res = VINode::sockOpen(FS, AddressFamily, SockType);
-        unlikely(!Res)) {
+    if (auto Res = VINode::sockOpen(AddressFamily, SockType); unlikely(!Res)) {
       return WasiUnexpect(Res);
     } else {
       Node = std::move(*Res);
@@ -838,17 +937,19 @@ public:
     return generateRandomFdToNode(Node);
   }
 
-  WasiExpect<void> sockBind(__wasi_fd_t Fd, uint8_t *Address,
-                            uint8_t AddressLength, uint16_t Port) noexcept {
+  WasiExpect<void> sockBind(__wasi_fd_t Fd,
+                            __wasi_address_family_t AddressFamily,
+                            Span<const uint8_t> Address,
+                            uint16_t Port) noexcept {
     auto Node = getNodeOrNull(Fd);
     if (unlikely(!Node)) {
       return WasiUnexpect(__WASI_ERRNO_BADF);
     } else {
-      return Node->sockBind(Address, AddressLength, Port);
+      return Node->sockBind(AddressFamily, Address, Port);
     }
   }
 
-  WasiExpect<void> sockListen(__wasi_fd_t Fd, uint32_t Backlog) noexcept {
+  WasiExpect<void> sockListen(__wasi_fd_t Fd, int32_t Backlog) noexcept {
     auto Node = getNodeOrNull(Fd);
     if (unlikely(!Node)) {
       return WasiUnexpect(__WASI_ERRNO_BADF);
@@ -857,11 +958,14 @@ public:
     }
   }
 
-  WasiExpect<__wasi_fd_t> sockAccept(__wasi_fd_t Fd, uint16_t Port) noexcept {
+  WasiExpect<__wasi_fd_t> sockAccept(__wasi_fd_t Fd,
+                                     __wasi_fdflags_t FdFlags) noexcept {
     auto Node = getNodeOrNull(Fd);
     std::shared_ptr<VINode> NewNode;
 
-    if (auto Res = Node->sockAccept(Port); unlikely(!Res)) {
+    if (unlikely(!Node)) {
+      return WasiUnexpect(__WASI_ERRNO_BADF);
+    } else if (auto Res = Node->sockAccept(FdFlags); unlikely(!Res)) {
       return WasiUnexpect(Res);
     } else {
       NewNode = std::move(*Res);
@@ -870,13 +974,15 @@ public:
     return generateRandomFdToNode(NewNode);
   }
 
-  WasiExpect<void> sockConnect(__wasi_fd_t Fd, uint8_t *Address,
-                               uint8_t AddressLength, uint16_t Port) noexcept {
+  WasiExpect<void> sockConnect(__wasi_fd_t Fd,
+                               __wasi_address_family_t AddressFamily,
+                               Span<const uint8_t> Address,
+                               uint16_t Port) noexcept {
     auto Node = getNodeOrNull(Fd);
     if (unlikely(!Node)) {
       return WasiUnexpect(__WASI_ERRNO_BADF);
     } else {
-      return Node->sockConnect(Address, AddressLength, Port);
+      return Node->sockConnect(AddressFamily, Address, Port);
     }
   }
 
@@ -901,6 +1007,34 @@ public:
     }
   }
 
+  /// Receive a message from a socket.
+  ///
+  /// Note: This is similar to `recvfrom` in POSIX, though it also supports
+  /// reading the data into multiple buffers in the manner of `readv`.
+  ///
+  /// @param[in] RiData List of scatter/gather vectors to which to store data.
+  /// @param[in] RiFlags Message flags.
+  /// @param[out] AddressFamilyPtr The pointer to store address family.
+  /// @param[out] Address The buffer to store address.
+  /// @param[out] PortPtr The pointer to store port.
+  /// @param[out] NRead Return the number of bytes stored in RiData.
+  /// @param[out] RoFlags Return message flags.
+  /// @return Nothing or WASI error.
+  WasiExpect<void> sockRecvFrom(__wasi_fd_t Fd, Span<Span<uint8_t>> RiData,
+                                __wasi_riflags_t RiFlags,
+                                __wasi_address_family_t *AddressFamilyPtr,
+                                Span<uint8_t> Address, uint16_t *PortPtr,
+                                __wasi_size_t &NRead,
+                                __wasi_roflags_t &RoFlags) const noexcept {
+    auto Node = getNodeOrNull(Fd);
+    if (unlikely(!Node)) {
+      return WasiUnexpect(__WASI_ERRNO_BADF);
+    } else {
+      return Node->sockRecvFrom(RiData, RiFlags, AddressFamilyPtr, Address,
+                                PortPtr, NRead, RoFlags);
+    }
+  }
+
   /// Send a message on a socket.
   ///
   /// Note: This is similar to `send` in POSIX, though it also supports writing
@@ -922,6 +1056,33 @@ public:
     }
   }
 
+  /// Send a message on a socket.
+  ///
+  /// Note: This is similar to `sendto` in POSIX, though it also supports
+  /// writing the data from multiple buffers in the manner of `writev`.
+  ///
+  /// @param[in] SiData List of scatter/gather vectors to which to retrieve
+  /// data.
+  /// @param[in] SiFlags Message flags.
+  /// @param[in] AddressFamily Address family of the target.
+  /// @param[in] Address Address of the target.
+  /// @param[in] Port Connected port.
+  /// @param[out] NWritten The number of bytes transmitted.
+  /// @return Nothing or WASI error
+  WasiExpect<void> sockSendTo(__wasi_fd_t Fd, Span<Span<const uint8_t>> SiData,
+                              __wasi_siflags_t SiFlags,
+                              __wasi_address_family_t AddressFamily,
+                              Span<const uint8_t> Address, uint16_t Port,
+                              __wasi_size_t &NWritten) const noexcept {
+    auto Node = getNodeOrNull(Fd);
+    if (unlikely(!Node)) {
+      return WasiUnexpect(__WASI_ERRNO_BADF);
+    } else {
+      return Node->sockSendTo(SiData, SiFlags, AddressFamily, Address, Port,
+                              NWritten);
+    }
+  }
+
   /// Shut down socket send and receive channels.
   ///
   /// Note: This is similar to `shutdown` in POSIX.
@@ -938,16 +1099,74 @@ public:
     }
   }
 
+  WasiExpect<void> sockGetOpt(__wasi_fd_t Fd,
+                              __wasi_sock_opt_level_t SockOptLevel,
+                              __wasi_sock_opt_so_t SockOptName,
+                              Span<uint8_t> &Flag) const noexcept {
+    auto Node = getNodeOrNull(Fd);
+    if (unlikely(!Node)) {
+      return WasiUnexpect(__WASI_ERRNO_BADF);
+    } else {
+      return Node->sockGetOpt(SockOptLevel, SockOptName, Flag);
+    }
+  }
+
+  WasiExpect<void> sockSetOpt(__wasi_fd_t Fd,
+                              __wasi_sock_opt_level_t SockOptLevel,
+                              __wasi_sock_opt_so_t SockOptName,
+                              Span<const uint8_t> Flag) const noexcept {
+    auto Node = getNodeOrNull(Fd);
+    if (unlikely(!Node)) {
+      return WasiUnexpect(__WASI_ERRNO_BADF);
+    } else {
+      return Node->sockSetOpt(SockOptLevel, SockOptName, Flag);
+    }
+  }
+
+  /// Return the address and port of the file descriptor.
+  WasiExpect<void> sockGetLocalAddr(__wasi_fd_t Fd,
+                                    __wasi_address_family_t *AddressFamilyPtr,
+                                    Span<uint8_t> Address,
+                                    uint16_t *PortPtr) const noexcept {
+    auto Node = getNodeOrNull(Fd);
+    if (unlikely(!Node)) {
+      return WasiUnexpect(__WASI_ERRNO_BADF);
+    } else {
+      return Node->sockGetLocalAddr(AddressFamilyPtr, Address, PortPtr);
+    }
+  }
+
+  /// Retrieve the remote address and port from the given file descriptor.
+  WasiExpect<void> sockGetPeerAddr(__wasi_fd_t Fd,
+                                   __wasi_address_family_t *AddressFamilyPtr,
+                                   Span<uint8_t> Address,
+                                   uint16_t *PortPtr) const noexcept {
+    auto Node = getNodeOrNull(Fd);
+    if (unlikely(!Node)) {
+      return WasiUnexpect(__WASI_ERRNO_BADF);
+    } else {
+      return Node->sockGetPeerAddr(AddressFamilyPtr, Address, PortPtr);
+    }
+  }
+
+  WasiExpect<uint64_t> getNativeHandler(__wasi_fd_t Fd) const noexcept {
+    auto Node = getNodeOrNull(Fd);
+    if (unlikely(!Node)) {
+      return WasiUnexpect(__WASI_ERRNO_BADF);
+    } else {
+      return Node->getNativeHandler();
+    }
+  }
+
   static std::string randomFilename() noexcept {
     using namespace std::literals;
     static constexpr const auto Charset =
         "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"sv;
-    std::random_device Device;
-    std::default_random_engine Engine(Device());
-    std::uniform_int_distribution<uint32_t> Distribution(0, Charset.size() - 1);
+    std::uniform_int_distribution<uint32_t> Distribution(
+        0, static_cast<uint32_t>(Charset.size() - 1));
     std::array<char, 8> Buffer;
-    std::array<uint32_t, 2> Values = {Distribution(Engine),
-                                      Distribution(Engine)};
+    std::array<uint32_t, 2> Values = {Distribution(Hash::RandEngine),
+                                      Distribution(Hash::RandEngine)};
     auto ValuesSpan = cxx20::as_bytes(cxx20::span(Values));
     std::copy(ValuesSpan.begin(), ValuesSpan.end(),
               cxx20::as_writable_bytes(cxx20::span(Buffer)).begin());
@@ -957,16 +1176,17 @@ public:
 private:
   std::vector<std::string> Arguments;
   std::vector<std::string> EnvironVariables;
-  VFS FS;
   __wasi_exitcode_t ExitCode = 0;
+
+  mutable std::shared_mutex PollerMutex; ///< Protect PollerPool
+  std::vector<EVPoller> PollerPool;
+  friend class EVPoller;
 
   mutable std::shared_mutex FdMutex; ///< Protect FdMap
   std::unordered_map<__wasi_fd_t, std::shared_ptr<VINode>> FdMap;
 
-  friend class EVPoller;
-
   std::shared_ptr<VINode> getNodeOrNull(__wasi_fd_t Fd) const {
-    std::shared_lock<std::shared_mutex> lock(FdMutex);
+    std::shared_lock Lock(FdMutex);
     if (auto It = FdMap.find(Fd); It != FdMap.end()) {
       return It->second;
     }
@@ -974,61 +1194,101 @@ private:
   }
 
   WasiExpect<__wasi_fd_t> generateRandomFdToNode(std::shared_ptr<VINode> Node) {
-    std::random_device Device;
-    std::default_random_engine Engine(Device());
     std::uniform_int_distribution<__wasi_fd_t> Distribution(0, 0x7FFFFFFF);
     bool Success = false;
     __wasi_fd_t NewFd;
     while (!Success) {
-      NewFd = Distribution(Engine);
-      std::unique_lock<std::shared_mutex> lock(FdMutex);
+      NewFd = Distribution(Hash::RandEngine);
+      std::unique_lock Lock(FdMutex);
       Success = FdMap.emplace(NewFd, Node).second;
     }
     return NewFd;
   }
 };
 
-class EVPoller : private VPoller {
+class EVPoller : protected VPoller {
 public:
+  EVPoller(EVPoller &&) = default;
+  EVPoller &operator=(EVPoller &&) = default;
+
   using VPoller::clock;
+  using VPoller::close;
+  using VPoller::error;
+  using VPoller::prepare;
+  using VPoller::reset;
+  using VPoller::result;
+  using VPoller::VPoller;
   using VPoller::wait;
 
-  EVPoller(VPoller &&P, Environ &E) : VPoller(std::move(P)), Env(E) {}
-
-  WasiExpect<void> clock(__wasi_clockid_t Clock, __wasi_timestamp_t Timeout,
-                         __wasi_timestamp_t Precision,
-                         __wasi_subclockflags_t Flags,
-                         __wasi_userdata_t UserData) noexcept {
-    return VPoller::clock(Clock, Timeout, Precision, Flags, UserData);
-  }
-
-  WasiExpect<void> read(__wasi_fd_t Fd, __wasi_userdata_t UserData) noexcept {
-    auto Node = Env.getNodeOrNull(Fd);
-    if (unlikely(!Node)) {
-      return WasiUnexpect(__WASI_ERRNO_BADF);
+  /// Concurrently poll for a ready-to-read event.
+  ///
+  /// @param[in] Fd The file descriptor on which to wait for it to become ready
+  /// for reading.
+  /// @param[in] Trigger Specifying whether the notification is level-trigger or
+  /// edge-trigger.
+  /// @param[in] UserData User-provided value that may be attached to objects
+  /// that is retained when extracted from the implementation.
+  void read(__wasi_fd_t Fd, TriggerType Trigger,
+            __wasi_userdata_t UserData) noexcept {
+    if (auto Node = env().getNodeOrNull(Fd); unlikely(!Node)) {
+      VPoller::error(UserData, __WASI_ERRNO_BADF, __WASI_EVENTTYPE_FD_READ);
     } else {
-      return VPoller::read(Node, UserData);
+      VPoller::read(Node, Trigger, UserData);
     }
   }
 
-  WasiExpect<void> write(__wasi_fd_t Fd, __wasi_userdata_t UserData) noexcept {
-    auto Node = Env.getNodeOrNull(Fd);
-    if (unlikely(!Node)) {
-      return WasiUnexpect(__WASI_ERRNO_BADF);
+  /// Concurrently poll for a ready-to-write event.
+  ///
+  /// @param[in] Fd The file descriptor on which to wait for it to become ready
+  /// for writing.
+  /// @param[in] Trigger Specifying whether the notification is level-trigger or
+  /// edge-trigger.
+  /// @param[in] UserData User-provided value that may be attached to objects
+  /// that is retained when extracted from the implementation.
+  void write(__wasi_fd_t Fd, TriggerType Trigger,
+             __wasi_userdata_t UserData) noexcept {
+    if (auto Node = env().getNodeOrNull(Fd); unlikely(!Node)) {
+      VPoller::error(UserData, __WASI_ERRNO_BADF, __WASI_EVENTTYPE_FD_WRITE);
     } else {
-      return VPoller::write(Node, UserData);
+      VPoller::write(Node, Trigger, UserData);
     }
   }
+
+  void close(std::shared_ptr<VINode> Node) noexcept { VPoller::close(Node); }
 
 private:
-  Environ &Env;
+  Environ &env() noexcept { return static_cast<Environ &>(Ctx.get()); }
 };
 
 inline WasiExpect<EVPoller>
-Environ::pollOneoff(__wasi_size_t NSubscriptions) noexcept {
-  return VINode::pollOneoff(NSubscriptions).map([this](VPoller &&P) {
-    return EVPoller(std::move(P), *this);
-  });
+Environ::acquirePoller(Span<__wasi_event_t> Events) noexcept {
+  auto Poller = [this]() noexcept -> EVPoller {
+    std::unique_lock Lock(PollerMutex);
+    if (PollerPool.empty()) {
+      return EVPoller(*this);
+    } else {
+      EVPoller Result(std::move(PollerPool.back()));
+      PollerPool.pop_back();
+      return Result;
+    }
+  }();
+
+  if (auto Res = Poller.prepare(Events); !Res) {
+    return WasiUnexpect(Res);
+  }
+  return Poller;
+}
+
+inline void Environ::close(std::shared_ptr<VINode> Node) noexcept {
+  std::unique_lock Lock(PollerMutex);
+  for (auto &Poller : PollerPool) {
+    Poller.close(Node);
+  }
+}
+
+inline void Environ::releasePoller(EVPoller &&Poller) noexcept {
+  std::unique_lock Lock(PollerMutex);
+  PollerPool.push_back(std::move(Poller));
 }
 
 } // namespace WASI

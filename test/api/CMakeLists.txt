@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2019-2024 Second State INC
 
-if(WASMEDGE_BUILD_AOT_RUNTIME)
-  add_definitions(-DWASMEDGE_BUILD_AOT_RUNTIME)
+if(WASMEDGE_USE_LLVM)
+  add_definitions(-DWASMEDGE_USE_LLVM)
+endif()
+if(WASMEDGE_BUILD_PLUGINS)
+  add_definitions(-DWASMEDGE_BUILD_PLUGINS)
 endif()
 
 file(COPY
@@ -17,7 +21,8 @@ wasmedge_add_library(wasmedgeAPITestHelpers
 
 target_link_libraries(wasmedgeAPITestHelpers
   PUBLIC
-  wasmedge_c_shared
+  wasmedge_shared
+  wasmedgeTestSpec
 )
 
 wasmedge_add_executable(wasmedgeAPIUnitTests
@@ -28,10 +33,13 @@ add_test(wasmedgeAPIUnitTests wasmedgeAPIUnitTests)
 
 target_link_libraries(wasmedgeAPIUnitTests
   PRIVATE
-  std::filesystem
-  ${GTEST_BOTH_LIBRARIES}
   wasmedgeAPITestHelpers
-  wasmedge_c_shared
+  wasmedge_shared
+)
+
+target_include_directories(wasmedgeAPIUnitTests
+  PRIVATE
+  ${CMAKE_SOURCE_DIR}/include
 )
 
 wasmedge_add_executable(wasmedgeAPIVMCoreTests
@@ -42,11 +50,8 @@ add_test(wasmedgeAPIVMCoreTests wasmedgeAPIVMCoreTests)
 
 target_link_libraries(wasmedgeAPIVMCoreTests
   PRIVATE
-  std::filesystem
-  ${GTEST_BOTH_LIBRARIES}
-  wasmedgeTestSpec
   wasmedgeAPITestHelpers
-  wasmedge_c_shared
+  wasmedge_shared
 )
 
 wasmedge_add_executable(wasmedgeAPIStepsCoreTests
@@ -57,14 +62,11 @@ add_test(wasmedgeAPIStepsCoreTests wasmedgeAPIStepsCoreTests)
 
 target_link_libraries(wasmedgeAPIStepsCoreTests
   PRIVATE
-  std::filesystem
-  ${GTEST_BOTH_LIBRARIES}
-  wasmedgeTestSpec
   wasmedgeAPITestHelpers
-  wasmedge_c_shared
+  wasmedge_shared
 )
 
-if (WASMEDGE_BUILD_AOT_RUNTIME)
+if(WASMEDGE_USE_LLVM)
   wasmedge_add_executable(wasmedgeAPIAOTCoreTests
     APIAOTCoreTest.cpp
   )
@@ -73,10 +75,19 @@ if (WASMEDGE_BUILD_AOT_RUNTIME)
 
   target_link_libraries(wasmedgeAPIAOTCoreTests
     PRIVATE
-    std::filesystem
-    ${GTEST_BOTH_LIBRARIES}
-    wasmedgeTestSpec
     wasmedgeAPITestHelpers
-    wasmedge_c_shared
+    wasmedge_shared
+  )
+
+  wasmedge_add_executable(wasmedgeAPIAOTNestedVMTests
+    APIAOTNestedVMTest.cpp
+  )
+
+  add_test(wasmedgeAPIAOTNestedVMTests wasmedgeAPIAOTNestedVMTests)
+
+  target_link_libraries(wasmedgeAPIAOTNestedVMTests
+    PRIVATE
+    wasmedgeAPITestHelpers
+    wasmedge_shared
   )
 endif()
