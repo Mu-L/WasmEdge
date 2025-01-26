@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2024 Second State INC
+
 //===-- wasmedge/ast/section.h - Section class definitions ----------------===//
 //
 // Part of the WasmEdge Project.
@@ -11,6 +13,12 @@
 //===----------------------------------------------------------------------===//
 #pragma once
 
+#include "ast/component/alias.h"
+#include "ast/component/canonical.h"
+#include "ast/component/import_export.h"
+#include "ast/component/instance.h"
+#include "ast/component/start.h"
+#include "ast/component/type.h"
 #include "ast/description.h"
 #include "ast/segment.h"
 
@@ -24,12 +32,19 @@ namespace AST {
 class Section {
 public:
   /// Getter and setter of content size.
-  uint32_t getContentSize() const noexcept { return ContentSize; }
-  void setContentSize(uint32_t Size) noexcept { ContentSize = Size; }
+  uint64_t getContentSize() const noexcept { return ContentSize; }
+  void setContentSize(uint64_t Size) noexcept { ContentSize = Size; }
+
+  /// Getter and setter of start offset in source.
+  uint64_t getStartOffset() const noexcept { return StartOffset; }
+  void setStartOffset(uint64_t Off) noexcept { StartOffset = Off; }
 
 protected:
   /// Content size of this section.
-  uint32_t ContentSize = 0;
+  uint64_t ContentSize = 0;
+
+  /// Start offset in source of this section.
+  uint64_t StartOffset = 0;
 };
 
 /// AST CustomSection node.
@@ -55,13 +70,13 @@ private:
 class TypeSection : public Section {
 public:
   /// Getter of content vector.
-  Span<const FunctionType> getContent() const noexcept { return Content; }
-  std::vector<FunctionType> &getContent() noexcept { return Content; }
+  Span<const SubType> getContent() const noexcept { return Content; }
+  std::vector<SubType> &getContent() noexcept { return Content; }
 
 private:
   /// \name Data of TypeSection.
   /// @{
-  std::vector<FunctionType> Content;
+  std::vector<SubType> Content;
   /// @}
 };
 
@@ -97,13 +112,13 @@ private:
 class TableSection : public Section {
 public:
   /// Getter of content vector.
-  Span<const TableType> getContent() const noexcept { return Content; }
-  std::vector<TableType> &getContent() noexcept { return Content; }
+  Span<const TableSegment> getContent() const noexcept { return Content; }
+  std::vector<TableSegment> &getContent() noexcept { return Content; }
 
 private:
   /// \name Data of TableSection.
   /// @{
-  std::vector<TableType> Content;
+  std::vector<TableSegment> Content;
   /// @}
 };
 
@@ -208,7 +223,7 @@ private:
 /// AST DataCountSection node.
 class DataCountSection : public Section {
 public:
-  /// Getter and of content.
+  /// Getter and setter of content.
   std::optional<uint32_t> getContent() const noexcept { return Content; }
   void setContent(uint32_t Val) noexcept { Content = Val; }
 
@@ -216,6 +231,20 @@ private:
   /// \name Data of DataCountSection.
   /// @{
   std::optional<uint32_t> Content = std::nullopt;
+  /// @}
+};
+
+/// AST TagSection node.
+class TagSection : public Section {
+public:
+  /// Getter of content vector.
+  Span<const TagType> getContent() const noexcept { return Content; }
+  std::vector<TagType> &getContent() noexcept { return Content; }
+
+private:
+  /// \name Data of TagSection.
+  /// @{
+  std::vector<TagType> Content;
   /// @}
 };
 
@@ -271,8 +300,142 @@ private:
   std::vector<uintptr_t> CodesAddress;
   std::vector<std::tuple<uint8_t, uint64_t, uint64_t, std::vector<Byte>>>
       Sections;
+  std::vector<uint8_t> Bytecodes;
   /// @}
 };
+
+namespace Component {
+
+class AliasSection : public Section {
+public:
+  /// Getter of content module.
+  Span<const Alias> getContent() const noexcept { return Content; }
+  std::vector<Alias> &getContent() noexcept { return Content; }
+
+private:
+  /// \name Data of AliasSection.
+  /// @{
+  std::vector<Alias> Content;
+  /// @}
+};
+
+class CoreInstanceSection : public Section {
+public:
+  /// Getter of content module.
+  Span<const CoreInstanceExpr> getContent() const noexcept { return Content; }
+  std::vector<CoreInstanceExpr> &getContent() noexcept { return Content; }
+
+private:
+  /// \name Data of CoreInstanceSection.
+  /// @{
+  std::vector<CoreInstanceExpr> Content;
+  /// @}
+};
+
+class InstanceSection : public Section {
+public:
+  /// Getter of content module.
+  Span<const InstanceExpr> getContent() const noexcept { return Content; }
+  std::vector<InstanceExpr> &getContent() noexcept { return Content; }
+
+private:
+  /// \name Data of InstanceSection.
+  /// @{
+  std::vector<InstanceExpr> Content;
+  /// @}
+};
+
+class CoreTypeSection : public Section {
+public:
+  /// Getter of content module.
+  Span<const CoreDefType> getContent() const noexcept { return Content; }
+  std::vector<CoreDefType> &getContent() noexcept { return Content; }
+
+private:
+  /// \name Data of CoreTypeSection.
+  /// @{
+  std::vector<CoreDefType> Content;
+  /// @}
+};
+
+class TypeSection : public Section {
+public:
+  /// Getter of content module.
+  Span<const DefType> getContent() const noexcept { return Content; }
+  std::vector<DefType> &getContent() noexcept { return Content; }
+
+private:
+  /// \name Data of TypeSection.
+  /// @{
+  std::vector<DefType> Content;
+  /// @}
+};
+
+class CanonSection : public Section {
+public:
+  /// Getter of content module.
+  Span<const Canon> getContent() const noexcept { return Content; }
+  std::vector<Canon> &getContent() noexcept { return Content; }
+
+private:
+  /// \name Data of CanonicalSection.
+  /// @{
+  std::vector<Canon> Content;
+  /// @}
+};
+
+class StartSection : public Section {
+public:
+  /// Getter of content module.
+  const Start &getContent() const noexcept { return Content; }
+  Start &getContent() noexcept { return Content; }
+
+private:
+  /// \name Data of StartSection.
+  /// @{
+  Start Content;
+  /// @}
+};
+
+class ImportSection : public Section {
+public:
+  /// Getter of content module.
+  Span<const Import> getContent() const noexcept { return Content; }
+  std::vector<Import> &getContent() noexcept { return Content; }
+
+private:
+  /// \name Data of ImportSection.
+  /// @{
+  std::vector<Import> Content;
+  /// @}
+};
+
+class ExportSection : public Section {
+public:
+  /// Getter of content module.
+  Span<const Export> getContent() const noexcept { return Content; }
+  std::vector<Export> &getContent() noexcept { return Content; }
+
+private:
+  /// \name Data of ExportSection.
+  /// @{
+  std::vector<Export> Content;
+  /// @}
+};
+
+class Component;
+
+class ComponentSection : public Section {
+public:
+  /// Getter of content.
+  const Component &getContent() const noexcept { return *Content; }
+  std::shared_ptr<Component> &getContent() noexcept { return Content; }
+
+private:
+  std::shared_ptr<Component> Content;
+};
+
+} // namespace Component
 
 } // namespace AST
 } // namespace WasmEdge

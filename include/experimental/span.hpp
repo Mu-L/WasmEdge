@@ -16,7 +16,9 @@
 
 #include <array>
 #include <cstddef>
+#include <iterator>
 #include <limits>
+#include <memory>
 #include <type_traits>
 
 namespace cxx20 {
@@ -160,6 +162,10 @@ struct span : public detail::span_storage<T, Extent> {
             enable_if_t<detail::is_generic_range_v<R> &&
                         detail::is_compatible_range_v<T, R>> * = nullptr>
   constexpr span(R &&r) : base(std::data(r), std::size(r)) {}
+  template <class U, enable_if_t<detail::is_compatible_element_v<T, const U>>
+                         * = nullptr>
+  constexpr span(std::initializer_list<U> il) noexcept
+      : base(std::data(il), il.size()) {}
   template <class U,
             enable_if_t<!is_same_v<T, U> &&
                         detail::is_compatible_element_v<T, U>> * = nullptr>
@@ -234,14 +240,14 @@ span(R &&) -> span<remove_pointer_t<decltype(data(declval<R>()))>>;
 template <class T, size_t N> auto as_bytes(span<T, N> s) noexcept {
   constexpr size_t NewExtend =
       (N == dynamic_extent ? dynamic_extent : sizeof(T) * N);
-  return span<const byte, NewExtend>(reinterpret_cast<const byte *>(s.data()),
+  return span<const std::byte, NewExtend>(reinterpret_cast<const std::byte *>(s.data()),
                                      s.size_bytes());
 }
 
 template <class T, size_t N> auto as_writable_bytes(span<T, N> s) noexcept {
   constexpr size_t NewExtend =
       (N == dynamic_extent ? dynamic_extent : sizeof(T) * N);
-  return span<byte, NewExtend>(reinterpret_cast<byte *>(s.data()),
+  return span<std::byte, NewExtend>(reinterpret_cast<std::byte *>(s.data()),
                                s.size_bytes());
 }
 

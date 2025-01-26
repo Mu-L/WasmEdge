@@ -4,7 +4,7 @@
 # $ bash clang-format.sh `which clang-format`
 
 lint() {
-    local targets="include lib tools"
+    local targets="include lib tools plugins examples"
     local clang_format="${1}"
 
     if [ "$#" -ne 1 ]; then
@@ -18,6 +18,7 @@ lint() {
     fi
 
     find ${targets} -type f -iname *.[ch] -o -iname *.cpp -o -iname *.[ch]xx \
+        | grep -v "/thirdparty/" \
         | xargs -n1 ${clang_format} -i -style=file -Werror --dry-run
 
     exit $?

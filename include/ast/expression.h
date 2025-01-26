@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2024 Second State INC
+
 //===-- wasmedge/ast/expression.h - Expression class definition -----------===//
 //
 // Part of the WasmEdge Project.
