@@ -1,23 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2019-2024 Second State INC
 
-find_package(spdlog QUIET)
-if(spdlog_FOUND)
-else()
-  FetchContent_Declare(
-    spdlog
-    GIT_REPOSITORY https://github.com/gabime/spdlog.git
-    GIT_TAG        v1.9.1
-    GIT_SHALLOW    TRUE
-  )
-  set(SPDLOG_BUILD_SHARED OFF CACHE BOOL "Build shared library")
-  set(BUILD_GMOCK OFF)
-  FetchContent_MakeAvailable(spdlog)
-  wasmedge_setup_target(spdlog)
-endif()
+wasmedge_setup_spdlog()
 
 wasmedge_add_library(wasmedgeCommon
+  hash.cpp
   hexstr.cpp
-  log.cpp
+  spdlog.cpp
   errinfo.cpp
 )
 

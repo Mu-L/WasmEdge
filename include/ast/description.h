@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2024 Second State INC
+
 //===-- wasmedge/ast/description.h - Desc classes definitions -------------===//
 //
 // Part of the WasmEdge Project.
@@ -13,7 +15,7 @@
 #pragma once
 
 #include "ast/type.h"
-#include "common/enum_types.h"
+#include "common/enum_types.hpp"
 
 #include <string>
 #include <string_view>
@@ -57,16 +59,18 @@ public:
   MemoryType &getExternalMemoryType() noexcept { return MemType; }
   const GlobalType &getExternalGlobalType() const noexcept { return GlobType; }
   GlobalType &getExternalGlobalType() noexcept { return GlobType; }
+  const TagType &getExternalTagType() const noexcept { return TgType; }
+  TagType &getExternalTagType() noexcept { return TgType; }
 
 private:
   /// \name Data of ImportDesc: Module name, External name, and content node.
   /// @{
   std::string ModName;
-  std::string ExtName;
   uint32_t FuncTypeIdx = 0;
   TableType TabType;
   MemoryType MemType;
   GlobalType GlobType;
+  TagType TgType;
   /// @}
 };
 

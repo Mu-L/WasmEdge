@@ -1,38 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2019-2024 Second State INC
 
 include(FetchContent)
+
+wasmedge_setup_simdjson()
+
+message(STATUS "Downloading the WASM spec test suite")
 FetchContent_Declare(
   wasmedge_unit_test
   GIT_REPOSITORY https://github.com/second-state/WasmEdge-unittest
-  GIT_TAG wasm-dev-0.8.0
+  GIT_TAG        wasm-dev
 )
 FetchContent_MakeAvailable(wasmedge_unit_test)
+message(STATUS "Downloading the WASM spec test suite -- done")
 
-FetchContent_Declare(
-  rapidjson
-  GIT_REPOSITORY https://github.com/Tencent/rapidjson.git
-  GIT_TAG        master
-  GIT_SHALLOW    TRUE
-)
-set(RAPIDJSON_BUILD_DOC OFF CACHE BOOL "Build rapidjson documentation." FORCE)
-set(RAPIDJSON_BUILD_EXAMPLES OFF CACHE BOOL "Build rapidjson examples." FORCE)
-set(RAPIDJSON_BUILD_TESTS OFF CACHE BOOL "Build rapidjson perftests and unittests." FORCE)
-set(RAPIDJSON_BUILD_CXX11 OFF CACHE BOOL "Build rapidjson with C++11" FORCE)
-set(RAPIDJSON_BUILD_CXX17 ON CACHE BOOL "Build rapidjson with C++17" FORCE)
-FetchContent_MakeAvailable(rapidjson)
-add_library(rapidjson INTERFACE)
-target_include_directories(rapidjson INTERFACE ${rapidjson_SOURCE_DIR}/include)
+function(wasmedge_copy_spec_testsuite proposal)
+  message(STATUS "Copying test suite to ${CMAKE_CURRENT_BINARY_DIR}/testSuites/${proposal}")
+  file(COPY
+    ${wasmedge_unit_test_SOURCE_DIR}/${proposal}
+    DESTINATION
+    ${CMAKE_CURRENT_BINARY_DIR}/testSuites
+  )
+  message(STATUS "Copying test suite to ${CMAKE_CURRENT_BINARY_DIR}/testSuites/${proposal} -- done")
+endfunction()
 
-file(COPY
-  ${wasmedge_unit_test_SOURCE_DIR}/core
-  DESTINATION
-  ${CMAKE_CURRENT_BINARY_DIR}/testSuites
-)
-file(COPY
-  ${wasmedge_unit_test_SOURCE_DIR}/simd
-  DESTINATION
-  ${CMAKE_CURRENT_BINARY_DIR}/testSuites
-)
+foreach(PROPOSAL core multi-memory tail-call extended-const threads function-references gc exception-handling exception-handling-legacy relaxed-simd)
+  wasmedge_copy_spec_testsuite(${PROPOSAL})
+endforeach()
 
 wasmedge_add_library(wasmedgeTestSpec
   spectest.cpp
@@ -40,7 +34,7 @@ wasmedge_add_library(wasmedgeTestSpec
 
 target_link_libraries(wasmedgeTestSpec
   PRIVATE
-  rapidjson
+  simdjson::simdjson
   PUBLIC
   std::filesystem
   wasmedgeCommon

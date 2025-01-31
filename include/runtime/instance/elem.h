@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2024 Second State INC
+
 //===-- wasmedge/runtime/instance/elem.h - Element Instance definition ----===//
 //
 // Part of the WasmEdge Project.
@@ -23,15 +25,17 @@ namespace Instance {
 class ElementInstance {
 public:
   ElementInstance() = delete;
-  ElementInstance(const uint32_t Offset, const RefType EType,
-                  Span<const RefVariant> Init)
-      : Off(Offset), Type(EType), Refs(Init.begin(), Init.end()) {}
+  ElementInstance(const uint32_t Offset, const ValType &EType,
+                  Span<const RefVariant> Init) noexcept
+      : Off(Offset), Type(EType), Refs(Init.begin(), Init.end()) {
+    assuming(Type.isRefType());
+  }
 
   /// Get offset in element instance.
   uint32_t getOffset() const noexcept { return Off; }
 
   /// Get reference type of element instance.
-  RefType getRefType() const { return Type; }
+  const ValType &getRefType() const noexcept { return Type; }
 
   /// Get reference lists in element instance.
   Span<const RefVariant> getRefs() const noexcept { return Refs; }
@@ -43,7 +47,7 @@ private:
   /// \name Data of element instance.
   /// @{
   const uint32_t Off;
-  const RefType Type;
+  const ValType Type;
   std::vector<RefVariant> Refs;
   /// @}
 };
