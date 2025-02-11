@@ -1,15 +1,15 @@
-## `-sys` library design principles
+# Overview
 
-In general, the `-sys` library should keep only `unsafe` C interface bindings and should not have redundant security abstractions.
+** `wasmedge-sys` is under [wasmedge-rust-sdk/crates/wasmedge-sys](https://github.com/WasmEdge/wasmedge-rust-sdk/tree/main/crates/wasmedge-sys) now. **
 
-However, for a pure Rust SDK like `wasmedge-rs` that we will eventually build, there should not be too many C binding interfaces. So,  the `wasmedge-sys` library uses a thin layer of Rust wrappers, exposing only the appropriate interfaces for the upper layer of `wasmedge-rs` to abstract a more usable pure Rust SDK.
+The [wasmedge-sys](https://crates.io/crates/wasmedge-sys) crate defines a group of low-level Rust APIs for WasmEdge, a light-weight, high-performance, and extensible WebAssembly runtime for cloud-native, edge, and decentralized applications.
 
-The interfaces exposed by the `-sys` library are supposed to be stable. That is, when the C interface changes, only the `-sys` library needs to be changed, not the upper-layer SDK.
+For developers, it is recommended that the APIs in `wasmedge-sys` are used to construct high-level libraries, while `wasmedge-sdk` is for building up business applications.
 
-## Library interface description
+* Notice that [wasmedge-sys](https://crates.io/crates/wasmedge-sys) requires **Rust v1.66 or above** in the **stable** channel.
 
-- Error handling: return `ErrReport` structures uniformly, and do further Rust-style error handling in the upper-level `-wasmedge-rs` SDK.
-- Incorporate basic types into the `-sys` library, e.g. Strings/Value etc., which the upper level SDK just needs to use.
-- Configuration/module loading/creating VMs/starting VMs to compute return results, these are put into the `-sys` library as the base interface for the SDK.
-- The base interface, which involves creation or initialization, uses basic "encapsulation" and is not open to downstream modifications to ensure the stability of the base interface.
-- The corresponding `C-API` header file and the corresponding Rust binding interface are recorded in the Dosc directory as documentation.
+## See also
+
+* [WasmEdge Runtime Official Website](https://wasmedge.org/)
+* [WasmEdge Docs](https://wasmedge.org/book/en/)
+* [WasmEdge C API Documentation](https://github.com/WasmEdge/WasmEdge/blob/master/docs/c_api.md)

@@ -20,18 +20,3 @@
   * [WasmEdge-extensions NAPI package](https://github.com/second-state/wasmedge-extensions) is the Node.js addon project for `WASM` runtime with `wasmedge-tensorflow`, `wasmedge-image`, and `wasmedge-storage` extensions.
   * [WasmEdge-go](https://github.com/second-state/WasmEdge-go) is the [Golang](https://golang.org/) binding for `WasmEdge` C API.
   * [WasmEdge-rs](https://github.com/WasmEdge/WasmEdge/tree/master/bindings/rust) is the Rust binding for `WasmEdge` C API.
-
-## Releasing Steps
-
-1. [WasmEdge core](https://github.com/WasmEdge/WasmEdge) Releases.
-2. Release a new version of plug-ins and libraries with updating to the new `WasmEdge core`.
-    * [WasmEdge-Image](https://github.com/second-state/WasmEdge-image)
-    * [WasmEdge-TensorFlow](https://github.com/second-state/WasmEdge-tensorflow)
-    * [WasmEdge-Storage](https://github.com/second-state/WasmEdge-storage)
-    * [WasmEdge-EVMC](https://github.com/second-state/WasmEdge-evmc)
-3. Release a new version of tools.
-    * [WasmEdge-TensorFlow-Tools](https://github.com/second-state/WasmEdge-tensorflow-tools)
-4. Release a new version of [Go SDK](https://github.com/second-state/WasmEdge-go)
-5. Release a new version of [Rust crate](https://github.com/WasmEdge/WasmEdge/tree/master/bindings/rust)
-6. Release [WasmEdge-core NAPI package](https://github.com/second-state/wasmedge-core) with updating to the new `WasmEdge core`.
-7. Release [WasmEdge-extensions NAPI package](https://github.com/second-state/wasmedge-extensions) with updating to the new extensions.

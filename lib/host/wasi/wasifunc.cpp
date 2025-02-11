@@ -1,14 +1,23 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2024 Second State INC
+
 #include "host/wasi/wasifunc.h"
 #include "common/filesystem.h"
-#include "common/log.h"
+#include "common/spdlog.h"
+#include "executor/executor.h"
 #include "host/wasi/environ.h"
 #include "runtime/instance/memory.h"
-#include <chrono>
-#include <csignal>
+
+#include <algorithm>
+#include <array>
 #include <limits>
 #include <numeric>
-#include <random>
-#include <string_view>
+#include <type_traits>
+#include <vector>
+
+#if defined(_MSC_VER) && !defined(__clang__)
+#define __restrict__ __restrict
+#endif
 
 namespace WasmEdge {
 namespace Host {
@@ -29,10 +38,18 @@ inline __wasi_size_t calculateBufferSize(const Container &Array) noexcept {
 template <typename T> struct WasiRawType {
   using Type = std::underlying_type_t<T>;
 };
-template <> struct WasiRawType<uint8_t> { using Type = uint8_t; };
-template <> struct WasiRawType<uint16_t> { using Type = uint16_t; };
-template <> struct WasiRawType<uint32_t> { using Type = uint32_t; };
-template <> struct WasiRawType<uint64_t> { using Type = uint64_t; };
+template <> struct WasiRawType<uint8_t> {
+  using Type = uint8_t;
+};
+template <> struct WasiRawType<uint16_t> {
+  using Type = uint16_t;
+};
+template <> struct WasiRawType<uint32_t> {
+  using Type = uint32_t;
+};
+template <> struct WasiRawType<uint64_t> {
+  using Type = uint64_t;
+};
 
 template <typename T> using WasiRawTypeT = typename WasiRawType<T>::Type;
 
@@ -181,8 +198,18 @@ cast<__wasi_fstflags_t>(uint64_t FdFlags) noexcept {
   const auto Mask = __WASI_FSTFLAGS_ATIM | __WASI_FSTFLAGS_ATIM_NOW |
                     __WASI_FSTFLAGS_MTIM | __WASI_FSTFLAGS_MTIM_NOW;
   if ((WasiRawTypeT<__wasi_fstflags_t>(FdFlags) & ~Mask) == 0) {
-    return static_cast<__wasi_fstflags_t>(FdFlags);
+    const auto WasiFstFlags = static_cast<__wasi_fstflags_t>(FdFlags);
+    if ((WasiFstFlags & __WASI_FSTFLAGS_ATIM) &&
+        (WasiFstFlags & __WASI_FSTFLAGS_ATIM_NOW)) {
+      return WASI::WasiUnexpect(__WASI_ERRNO_INVAL);
+    }
+    if ((WasiFstFlags & __WASI_FSTFLAGS_MTIM) &&
+        (WasiFstFlags & __WASI_FSTFLAGS_MTIM_NOW)) {
+      return WASI::WasiUnexpect(__WASI_ERRNO_INVAL);
+    }
+    return WasiFstFlags;
   }
+
   return WASI::WasiUnexpect(__WASI_ERRNO_INVAL);
 }
 
@@ -253,6 +280,7 @@ cast<__wasi_address_family_t>(uint64_t Family) noexcept {
   switch (WasiRawTypeT<__wasi_address_family_t>(Family)) {
   case __WASI_ADDRESS_FAMILY_INET4:
   case __WASI_ADDRESS_FAMILY_INET6:
+  case __WASI_ADDRESS_FAMILY_AF_UNIX:
     return static_cast<__wasi_address_family_t>(Family);
   default:
     return WASI::WasiUnexpect(__WASI_ERRNO_INVAL);
@@ -271,51 +299,122 @@ cast<__wasi_sock_type_t>(uint64_t SockType) noexcept {
   }
 }
 
+template <>
+WASI::WasiExpect<__wasi_sock_opt_level_t>
+cast<__wasi_sock_opt_level_t>(uint64_t SockOptLevel) noexcept {
+  switch (WasiRawTypeT<__wasi_sock_opt_level_t>(SockOptLevel)) {
+  case __WASI_SOCK_OPT_LEVEL_SOL_SOCKET:
+    return static_cast<__wasi_sock_opt_level_t>(SockOptLevel);
+  default:
+    return WASI::WasiUnexpect(__WASI_ERRNO_INVAL);
+  }
+}
+
+template <>
+WASI::WasiExpect<__wasi_sock_opt_so_t>
+cast<__wasi_sock_opt_so_t>(uint64_t SockOptName) noexcept {
+  switch (WasiRawTypeT<__wasi_sock_opt_so_t>(SockOptName)) {
+  case __WASI_SOCK_OPT_SO_REUSEADDR:
+  case __WASI_SOCK_OPT_SO_TYPE:
+  case __WASI_SOCK_OPT_SO_ERROR:
+  case __WASI_SOCK_OPT_SO_DONTROUTE:
+  case __WASI_SOCK_OPT_SO_BROADCAST:
+  case __WASI_SOCK_OPT_SO_SNDBUF:
+  case __WASI_SOCK_OPT_SO_RCVBUF:
+  case __WASI_SOCK_OPT_SO_KEEPALIVE:
+  case __WASI_SOCK_OPT_SO_OOBINLINE:
+  case __WASI_SOCK_OPT_SO_LINGER:
+  case __WASI_SOCK_OPT_SO_RCVLOWAT:
+  case __WASI_SOCK_OPT_SO_RCVTIMEO:
+  case __WASI_SOCK_OPT_SO_SNDTIMEO:
+  case __WASI_SOCK_OPT_SO_ACCEPTCONN:
+  case __WASI_SOCK_OPT_SO_BINDTODEVICE:
+    return static_cast<__wasi_sock_opt_so_t>(SockOptName);
+  default:
+    return WASI::WasiUnexpect(__WASI_ERRNO_INVAL);
+  }
+}
+
+template <typename T, size_t MaxSize> class StaticVector {
+public:
+  constexpr StaticVector() = default;
+  constexpr const T *data() const noexcept {
+    return reinterpret_cast<T *>(Storage);
+  }
+  constexpr T *data() noexcept { return reinterpret_cast<T *>(Storage); }
+  constexpr size_t size() const noexcept { return Size; }
+  template <typename... ArgsT>
+  void emplace_back_unchecked(ArgsT &&...Args) noexcept(
+      std::is_nothrow_constructible_v<T, ArgsT...>) {
+    assuming(Size < MaxSize);
+    new (data() + Size) T(std::forward<ArgsT>(Args)...);
+    ++Size;
+  }
+  ~StaticVector() noexcept(std::is_nothrow_destructible_v<T>) {
+    std::destroy_n(data(), Size);
+  }
+
+private:
+  size_t Size = 0;
+  alignas(alignof(T)) uint8_t Storage[sizeof(T[MaxSize])];
+};
+
+bool AllowAFUNIX(const Runtime::CallingFrame &Frame,
+                 __wasi_address_family_t AddressFamily) {
+  if (AddressFamily == __WASI_ADDRESS_FAMILY_AF_UNIX) {
+    return Frame.getExecutor()
+        ->getConfigure()
+        .getRuntimeConfigure()
+        .isAllowAFUNIX();
+  }
+  return true;
+}
 } // namespace
 
-Expect<uint32_t> WasiArgsGet::body(Runtime::Instance::MemoryInstance *MemInst,
+Expect<uint32_t> WasiArgsGet::body(const Runtime::CallingFrame &Frame,
                                    uint32_t ArgvPtr, uint32_t ArgvBufPtr) {
-  /// Check memory instance from module.
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
 
-  /// Store **Argv.
+  // Store **Argv.
   const auto &Arguments = Env.getArguments();
-  const uint32_t ArgvSize =
-      static_cast<uint32_t>(Arguments.size()) + UINT32_C(1);
+  const uint32_t ArgvSize = static_cast<uint32_t>(Arguments.size());
   const uint32_t ArgvBufSize = calculateBufferSize(Arguments);
 
-  /// Check for invalid address.
-  auto *const Argv = MemInst->getPointer<uint8_t_ptr *>(ArgvPtr, ArgvSize);
-  if (unlikely(Argv == nullptr)) {
+  // Check for invalid address.
+  const auto Argv = MemInst->getSpan<uint8_t_ptr>(ArgvPtr, ArgvSize);
+  if (unlikely(Argv.size() != ArgvSize)) {
     return __WASI_ERRNO_FAULT;
   }
-  auto *const ArgvBuf = MemInst->getPointer<uint8_t *>(ArgvBufPtr, ArgvBufSize);
-  if (unlikely(ArgvBuf == nullptr)) {
+  const auto ArgvBuf = MemInst->getSpan<uint8_t>(ArgvBufPtr, ArgvBufSize);
+  if (unlikely(ArgvBuf.size() != ArgvBufSize)) {
     return __WASI_ERRNO_FAULT;
   }
 
-  *Argv = ArgvBufPtr;
+  if (!Argv.empty()) {
+    Argv[0] = ArgvBufPtr;
+  }
 
-  if (auto Res = Env.argsGet({Argv, ArgvSize}, {ArgvBuf, ArgvBufSize});
-      unlikely(!Res)) {
+  if (auto Res = Env.argsGet(Argv, ArgvBuf); unlikely(!Res)) {
     return Res.error();
   }
 
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t>
-WasiArgsSizesGet::body(Runtime::Instance::MemoryInstance *MemInst,
-                       uint32_t /* Out */ ArgcPtr,
-                       uint32_t /* Out */ ArgvBufSizePtr) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiArgsSizesGet::body(const Runtime::CallingFrame &Frame,
+                                        uint32_t /* Out */ ArgcPtr,
+                                        uint32_t /* Out */ ArgvBufSizePtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
 
-  /// Check for invalid address.
+  // Check for invalid address.
   auto *const __restrict__ Argc = MemInst->getPointer<__wasi_size_t *>(ArgcPtr);
   if (unlikely(Argc == nullptr)) {
     return __WASI_ERRNO_FAULT;
@@ -332,50 +431,50 @@ WasiArgsSizesGet::body(Runtime::Instance::MemoryInstance *MemInst,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t>
-WasiEnvironGet::body(Runtime::Instance::MemoryInstance *MemInst,
-                     uint32_t EnvPtr, uint32_t EnvBufPtr) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiEnvironGet::body(const Runtime::CallingFrame &Frame,
+                                      uint32_t EnvPtr, uint32_t EnvBufPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
 
-  /// Store **Env.
+  // Store **Env.
   const auto &EnvironVariables = Env.getEnvironVariables();
-  const uint32_t EnvSize =
-      static_cast<uint32_t>(EnvironVariables.size()) + UINT32_C(1);
+  const uint32_t EnvSize = static_cast<uint32_t>(EnvironVariables.size());
   const uint32_t EnvBufSize = calculateBufferSize(EnvironVariables);
 
-  /// Check for invalid address.
-  auto *const Env = MemInst->getPointer<uint8_t_ptr *>(EnvPtr, EnvSize);
-  if (unlikely(Env == nullptr)) {
+  // Check for invalid address.
+  const auto EnvSpan = MemInst->getSpan<uint8_t_ptr>(EnvPtr, EnvSize);
+  if (unlikely(EnvSpan.size() != EnvSize)) {
     return __WASI_ERRNO_FAULT;
   }
-  auto *const EnvBuf = MemInst->getPointer<uint8_t *>(EnvBufPtr, EnvBufSize);
-  if (unlikely(EnvBuf == nullptr)) {
+  const auto EnvBuf = MemInst->getSpan<uint8_t>(EnvBufPtr, EnvBufSize);
+  if (unlikely(EnvBuf.size() != EnvBufSize)) {
     return __WASI_ERRNO_FAULT;
   }
 
-  *Env = EnvBufPtr;
+  if (!EnvSpan.empty()) {
+    EnvSpan[0] = EnvBufPtr;
+  }
 
-  if (auto Res = this->Env.environGet({Env, EnvSize}, {EnvBuf, EnvBufSize});
-      unlikely(!Res)) {
+  if (auto Res = this->Env.environGet(EnvSpan, EnvBuf); unlikely(!Res)) {
     return Res.error();
   }
 
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t>
-WasiEnvironSizesGet::body(Runtime::Instance::MemoryInstance *MemInst,
-                          uint32_t /* Out */ EnvCntPtr,
-                          uint32_t /* Out */ EnvBufSizePtr) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiEnvironSizesGet::body(const Runtime::CallingFrame &Frame,
+                                           uint32_t /* Out */ EnvCntPtr,
+                                           uint32_t /* Out */ EnvBufSizePtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
 
-  /// Check for invalid address.
+  // Check for invalid address.
   auto *const __restrict__ Envc =
       MemInst->getPointer<__wasi_size_t *>(EnvCntPtr);
   if (unlikely(Envc == nullptr)) {
@@ -393,10 +492,11 @@ WasiEnvironSizesGet::body(Runtime::Instance::MemoryInstance *MemInst,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t>
-WasiClockResGet::body(Runtime::Instance::MemoryInstance *MemInst,
-                      uint32_t ClockId, uint32_t /* Out */ ResolutionPtr) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiClockResGet::body(const Runtime::CallingFrame &Frame,
+                                       uint32_t ClockId,
+                                       uint32_t /* Out */ ResolutionPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
@@ -420,11 +520,11 @@ WasiClockResGet::body(Runtime::Instance::MemoryInstance *MemInst,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t>
-WasiClockTimeGet::body(Runtime::Instance::MemoryInstance *MemInst,
-                       uint32_t ClockId, uint64_t Precision,
-                       uint32_t /* Out */ TimePtr) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiClockTimeGet::body(const Runtime::CallingFrame &Frame,
+                                        uint32_t ClockId, uint64_t Precision,
+                                        uint32_t /* Out */ TimePtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
@@ -450,8 +550,8 @@ WasiClockTimeGet::body(Runtime::Instance::MemoryInstance *MemInst,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiFdAdvise::body(Runtime::Instance::MemoryInstance *,
-                                    int32_t Fd, uint64_t Offset, uint64_t Len,
+Expect<uint32_t> WasiFdAdvise::body(const Runtime::CallingFrame &, int32_t Fd,
+                                    uint64_t Offset, uint64_t Len,
                                     uint32_t Advice) {
   __wasi_advice_t WasiAdvice;
   if (auto Res = cast<__wasi_advice_t>(Advice); unlikely(!Res)) {
@@ -471,9 +571,8 @@ Expect<uint32_t> WasiFdAdvise::body(Runtime::Instance::MemoryInstance *,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiFdAllocate::body(Runtime::Instance::MemoryInstance *,
-                                      int32_t Fd, uint64_t Offset,
-                                      uint64_t Len) {
+Expect<uint32_t> WasiFdAllocate::body(const Runtime::CallingFrame &, int32_t Fd,
+                                      uint64_t Offset, uint64_t Len) {
   const __wasi_fd_t WasiFd = Fd;
   const __wasi_filesize_t WasiOffset = Offset;
   const __wasi_filesize_t WasiLen = Len;
@@ -484,8 +583,7 @@ Expect<uint32_t> WasiFdAllocate::body(Runtime::Instance::MemoryInstance *,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiFdClose::body(Runtime::Instance::MemoryInstance *,
-                                   int32_t Fd) {
+Expect<uint32_t> WasiFdClose::body(const Runtime::CallingFrame &, int32_t Fd) {
   const __wasi_fd_t WasiFd = Fd;
 
   if (auto Res = Env.fdClose(WasiFd); unlikely(!Res)) {
@@ -494,7 +592,7 @@ Expect<uint32_t> WasiFdClose::body(Runtime::Instance::MemoryInstance *,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiFdDatasync::body(Runtime::Instance::MemoryInstance *,
+Expect<uint32_t> WasiFdDatasync::body(const Runtime::CallingFrame &,
                                       int32_t Fd) {
   const __wasi_fd_t WasiFd = Fd;
 
@@ -504,10 +602,11 @@ Expect<uint32_t> WasiFdDatasync::body(Runtime::Instance::MemoryInstance *,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t>
-WasiFdFdstatGet::body(Runtime::Instance::MemoryInstance *MemInst, int32_t Fd,
-                      uint32_t /* Out */ FdStatPtr) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiFdFdstatGet::body(const Runtime::CallingFrame &Frame,
+                                       int32_t Fd,
+                                       uint32_t /* Out */ FdStatPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
@@ -525,7 +624,7 @@ WasiFdFdstatGet::body(Runtime::Instance::MemoryInstance *MemInst, int32_t Fd,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiFdFdstatSetFlags::body(Runtime::Instance::MemoryInstance *,
+Expect<uint32_t> WasiFdFdstatSetFlags::body(const Runtime::CallingFrame &,
                                             int32_t Fd, uint32_t FsFlags) {
   __wasi_fdflags_t WasiFdFlags;
   if (auto Res = cast<__wasi_fdflags_t>(FsFlags); unlikely(!Res)) {
@@ -542,10 +641,9 @@ Expect<uint32_t> WasiFdFdstatSetFlags::body(Runtime::Instance::MemoryInstance *,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t>
-WasiFdFdstatSetRights::body(Runtime::Instance::MemoryInstance *, int32_t Fd,
-                            uint64_t FsRightsBase,
-                            uint64_t FsRightsInheriting) {
+Expect<uint32_t> WasiFdFdstatSetRights::body(const Runtime::CallingFrame &,
+                                             int32_t Fd, uint64_t FsRightsBase,
+                                             uint64_t FsRightsInheriting) {
   __wasi_rights_t WasiFsRightsBase;
   if (auto Res = cast<__wasi_rights_t>(FsRightsBase); unlikely(!Res)) {
     return Res.error();
@@ -570,10 +668,11 @@ WasiFdFdstatSetRights::body(Runtime::Instance::MemoryInstance *, int32_t Fd,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t>
-WasiFdFilestatGet::body(Runtime::Instance::MemoryInstance *MemInst, int32_t Fd,
-                        uint32_t /* Out */ FilestatPtr) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiFdFilestatGet::body(const Runtime::CallingFrame &Frame,
+                                         int32_t Fd,
+                                         uint32_t /* Out */ FilestatPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
@@ -591,9 +690,8 @@ WasiFdFilestatGet::body(Runtime::Instance::MemoryInstance *MemInst, int32_t Fd,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t>
-WasiFdFilestatSetSize::body(Runtime::Instance::MemoryInstance *, int32_t Fd,
-                            uint64_t Size) {
+Expect<uint32_t> WasiFdFilestatSetSize::body(const Runtime::CallingFrame &,
+                                             int32_t Fd, uint64_t Size) {
   const __wasi_fd_t WasiFd = Fd;
   const __wasi_filesize_t WasiSize = Size;
 
@@ -603,9 +701,10 @@ WasiFdFilestatSetSize::body(Runtime::Instance::MemoryInstance *, int32_t Fd,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t>
-WasiFdFilestatSetTimes::body(Runtime::Instance::MemoryInstance *, int32_t Fd,
-                             uint64_t ATim, uint64_t MTim, uint32_t FstFlags) {
+Expect<uint32_t> WasiFdFilestatSetTimes::body(const Runtime::CallingFrame &,
+                                              int32_t Fd, uint64_t ATim,
+                                              uint64_t MTim,
+                                              uint32_t FstFlags) {
   __wasi_fstflags_t WasiFstFlags;
   if (auto Res = cast<__wasi_fstflags_t>(FstFlags); unlikely(!Res)) {
     return Res.error();
@@ -625,11 +724,12 @@ WasiFdFilestatSetTimes::body(Runtime::Instance::MemoryInstance *, int32_t Fd,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiFdPread::body(Runtime::Instance::MemoryInstance *MemInst,
+Expect<uint32_t> WasiFdPread::body(const Runtime::CallingFrame &Frame,
                                    int32_t Fd, uint32_t IOVsPtr,
                                    uint32_t IOVsLen, uint64_t Offset,
                                    uint32_t /* Out */ NReadPtr) {
-  /// Check memory instance from module.
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
@@ -639,10 +739,9 @@ Expect<uint32_t> WasiFdPread::body(Runtime::Instance::MemoryInstance *MemInst,
     return __WASI_ERRNO_INVAL;
   }
 
-  /// Check for invalid address.
-  auto *const IOVsArray =
-      MemInst->getPointer<__wasi_iovec_t *>(IOVsPtr, WasiIOVsLen);
-  if (unlikely(IOVsArray == nullptr)) {
+  // Check for invalid address.
+  const auto IOVsArray = MemInst->getSpan<__wasi_iovec_t>(IOVsPtr, WasiIOVsLen);
+  if (unlikely(IOVsArray.size() != WasiIOVsLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
@@ -652,63 +751,61 @@ Expect<uint32_t> WasiFdPread::body(Runtime::Instance::MemoryInstance *MemInst,
   }
 
   __wasi_size_t TotalSize = 0;
-  std::array<Span<uint8_t>, WASI::kIOVMax> WasiIOVs;
+  StaticVector<Span<uint8_t>, WASI::kIOVMax> WasiIOVs;
 
-  for (__wasi_size_t I = 0; I < WasiIOVsLen; ++I) {
-    __wasi_iovec_t &IOV = IOVsArray[I];
-
-    /// Capping total size.
+  for (auto &IOV : IOVsArray) {
+    // Capping total size.
     const __wasi_size_t Space =
         std::numeric_limits<__wasi_size_t>::max() - TotalSize;
     const __wasi_size_t BufLen =
         unlikely(IOV.buf_len > Space) ? Space : IOV.buf_len;
     TotalSize += BufLen;
 
-    /// Check for invalid address.
-    auto *const ReadArr = MemInst->getPointer<uint8_t *>(IOV.buf, BufLen);
-    if (unlikely(ReadArr == nullptr)) {
+    // Check for invalid address.
+    const auto ReadArr = MemInst->getSpan<uint8_t>(IOV.buf, BufLen);
+    if (unlikely(ReadArr.size() != BufLen)) {
       return __WASI_ERRNO_FAULT;
     }
-    WasiIOVs[I] = {ReadArr, BufLen};
+    WasiIOVs.emplace_back_unchecked(ReadArr);
   }
 
   const __wasi_fd_t WasiFd = Fd;
   const __wasi_filesize_t WasiOffset = Offset;
 
-  if (auto Res = Env.fdPread(WasiFd, {WasiIOVs.data(), WasiIOVsLen}, WasiOffset,
-                             *NRead);
+  if (auto Res = Env.fdPread(WasiFd, WasiIOVs, WasiOffset, *NRead);
       unlikely(!Res)) {
     return Res.error();
   }
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t>
-WasiFdPrestatDirName::body(Runtime::Instance::MemoryInstance *MemInst,
-                           int32_t Fd, uint32_t PathBufPtr, uint32_t PathLen) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiFdPrestatDirName::body(const Runtime::CallingFrame &Frame,
+                                            int32_t Fd, uint32_t PathBufPtr,
+                                            uint32_t PathLen) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
 
-  auto *const PathBuf = MemInst->getPointer<uint8_t *>(PathBufPtr, PathLen);
-  if (unlikely(PathBuf == nullptr)) {
+  const auto PathBuf = MemInst->getSpan<uint8_t>(PathBufPtr, PathLen);
+  if (unlikely(PathBuf.size() != PathLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_fd_t WasiFd = Fd;
 
-  if (auto Res = Env.fdPrestatDirName(WasiFd, {PathBuf, PathLen});
-      unlikely(!Res)) {
+  if (auto Res = Env.fdPrestatDirName(WasiFd, PathBuf); unlikely(!Res)) {
     return Res.error();
   }
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t>
-WasiFdPrestatGet::body(Runtime::Instance::MemoryInstance *MemInst, int32_t Fd,
-                       uint32_t /* Out */ PreStatPtr) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiFdPrestatGet::body(const Runtime::CallingFrame &Frame,
+                                        int32_t Fd,
+                                        uint32_t /* Out */ PreStatPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
@@ -727,11 +824,12 @@ WasiFdPrestatGet::body(Runtime::Instance::MemoryInstance *MemInst, int32_t Fd,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiFdPwrite::body(Runtime::Instance::MemoryInstance *MemInst,
+Expect<uint32_t> WasiFdPwrite::body(const Runtime::CallingFrame &Frame,
                                     int32_t Fd, uint32_t IOVsPtr,
                                     uint32_t IOVsLen, uint64_t Offset,
                                     uint32_t /* Out */ NWrittenPtr) {
-  /// Check memory instance from module.
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
@@ -741,57 +839,54 @@ Expect<uint32_t> WasiFdPwrite::body(Runtime::Instance::MemoryInstance *MemInst,
     return __WASI_ERRNO_INVAL;
   }
 
-  /// Check for invalid address.
-  auto *const IOVsArray =
-      MemInst->getPointer<__wasi_ciovec_t *>(IOVsPtr, WasiIOVsLen);
-  if (unlikely(IOVsArray == nullptr)) {
+  // Check for invalid address.
+  const auto IOVsArray =
+      MemInst->getSpan<__wasi_ciovec_t>(IOVsPtr, WasiIOVsLen);
+  if (unlikely(IOVsArray.size() != WasiIOVsLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
-  /// Check for invalid address.
+  // Check for invalid address.
   auto *const NWritten = MemInst->getPointer<__wasi_size_t *>(NWrittenPtr);
   if (unlikely(NWritten == nullptr)) {
     return __WASI_ERRNO_FAULT;
   }
 
   __wasi_size_t TotalSize = 0;
-  std::array<Span<const uint8_t>, WASI::kIOVMax> WasiIOVs;
+  StaticVector<Span<const uint8_t>, WASI::kIOVMax> WasiIOVs;
 
-  for (__wasi_size_t I = 0; I < WasiIOVsLen; ++I) {
-    __wasi_ciovec_t &IOV = IOVsArray[I];
-
-    /// Capping total size.
+  for (auto &IOV : IOVsArray) {
+    // Capping total size.
     const __wasi_size_t Space =
         std::numeric_limits<__wasi_size_t>::max() - TotalSize;
     const __wasi_size_t BufLen =
         unlikely(IOV.buf_len > Space) ? Space : IOV.buf_len;
     TotalSize += BufLen;
 
-    /// Check for invalid address.
-    auto *const WriteArr =
-        MemInst->getPointer<const uint8_t *>(IOV.buf, BufLen);
-    if (unlikely(WriteArr == nullptr)) {
+    // Check for invalid address.
+    const auto WriteArr = MemInst->getSpan<const uint8_t>(IOV.buf, BufLen);
+    if (unlikely(WriteArr.size() != BufLen)) {
       return __WASI_ERRNO_FAULT;
     }
-    WasiIOVs[I] = {WriteArr, BufLen};
+    WasiIOVs.emplace_back_unchecked(WriteArr);
   }
 
   const __wasi_fd_t WasiFd = Fd;
   const __wasi_filesize_t WasiOffset = Offset;
 
-  if (auto Res = Env.fdPwrite(WasiFd, {WasiIOVs.data(), WasiIOVsLen},
-                              WasiOffset, *NWritten);
+  if (auto Res = Env.fdPwrite(WasiFd, WasiIOVs, WasiOffset, *NWritten);
       unlikely(!Res)) {
     return Res.error();
   }
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiFdRead::body(Runtime::Instance::MemoryInstance *MemInst,
+Expect<uint32_t> WasiFdRead::body(const Runtime::CallingFrame &Frame,
                                   int32_t Fd, uint32_t IOVsPtr,
                                   uint32_t IOVsLen,
                                   uint32_t /* Out */ NReadPtr) {
-  /// Check memory instance from module.
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
@@ -801,10 +896,9 @@ Expect<uint32_t> WasiFdRead::body(Runtime::Instance::MemoryInstance *MemInst,
     return __WASI_ERRNO_INVAL;
   }
 
-  /// Check for invalid address.
-  auto *const IOVsArray =
-      MemInst->getPointer<__wasi_iovec_t *>(IOVsPtr, WasiIOVsLen);
-  if (unlikely(IOVsArray == nullptr)) {
+  // Check for invalid address.
+  const auto IOVsArray = MemInst->getSpan<__wasi_iovec_t>(IOVsPtr, WasiIOVsLen);
+  if (unlikely(IOVsArray.size() != WasiIOVsLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
@@ -814,49 +908,47 @@ Expect<uint32_t> WasiFdRead::body(Runtime::Instance::MemoryInstance *MemInst,
   }
 
   __wasi_size_t TotalSize = 0;
-  std::array<Span<uint8_t>, WASI::kIOVMax> WasiIOVs;
+  StaticVector<Span<uint8_t>, WASI::kIOVMax> WasiIOVs;
 
-  for (__wasi_size_t I = 0; I < WasiIOVsLen; ++I) {
-    __wasi_iovec_t &IOV = IOVsArray[I];
-
-    /// Capping total size.
+  for (auto &IOV : IOVsArray) {
+    // Capping total size.
     const __wasi_size_t Space =
         std::numeric_limits<__wasi_size_t>::max() - TotalSize;
     const __wasi_size_t BufLen =
         unlikely(IOV.buf_len > Space) ? Space : IOV.buf_len;
     TotalSize += BufLen;
 
-    /// Check for invalid address.
-    auto *const ReadArr = MemInst->getPointer<uint8_t *>(IOV.buf, BufLen);
-    if (unlikely(ReadArr == nullptr)) {
+    // Check for invalid address.
+    const auto ReadArr = MemInst->getSpan<uint8_t>(IOV.buf, BufLen);
+    if (unlikely(ReadArr.size() != BufLen)) {
       return __WASI_ERRNO_FAULT;
     }
-    WasiIOVs[I] = {ReadArr, BufLen};
+    WasiIOVs.emplace_back_unchecked(ReadArr);
   }
 
   const __wasi_fd_t WasiFd = Fd;
 
-  if (auto Res = Env.fdRead(WasiFd, {WasiIOVs.data(), WasiIOVsLen}, *NRead);
-      unlikely(!Res)) {
+  if (auto Res = Env.fdRead(WasiFd, WasiIOVs, *NRead); unlikely(!Res)) {
     return Res.error();
   }
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiFdReadDir::body(Runtime::Instance::MemoryInstance *MemInst,
+Expect<uint32_t> WasiFdReadDir::body(const Runtime::CallingFrame &Frame,
                                      int32_t Fd, uint32_t BufPtr,
                                      uint32_t BufLen, uint64_t Cookie,
                                      uint32_t /* Out */ NReadPtr) {
-  /// Check memory instance from module.
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_size_t WasiBufLen = BufLen;
 
-  /// Check for invalid address.
-  auto *Buf = MemInst->getPointer<uint8_t *>(BufPtr, WasiBufLen);
-  if (unlikely(Buf == nullptr)) {
+  // Check for invalid address.
+  const auto Buf = MemInst->getSpan<uint8_t>(BufPtr, WasiBufLen);
+  if (unlikely(Buf.size() != WasiBufLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
@@ -868,15 +960,15 @@ Expect<uint32_t> WasiFdReadDir::body(Runtime::Instance::MemoryInstance *MemInst,
   const __wasi_fd_t WasiFd = Fd;
   const __wasi_dircookie_t WasiCookie = Cookie;
 
-  if (auto Res = Env.fdReaddir(WasiFd, {Buf, WasiBufLen}, WasiCookie, *NRead);
+  if (auto Res = Env.fdReaddir(WasiFd, Buf, WasiCookie, *NRead);
       unlikely(!Res)) {
     return Res.error();
   }
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiFdRenumber::body(Runtime::Instance::MemoryInstance *,
-                                      int32_t Fd, int32_t ToFd) {
+Expect<uint32_t> WasiFdRenumber::body(const Runtime::CallingFrame &, int32_t Fd,
+                                      int32_t ToFd) {
   const __wasi_fd_t WasiFd = Fd;
   const __wasi_fd_t WasiToFd = ToFd;
 
@@ -886,10 +978,11 @@ Expect<uint32_t> WasiFdRenumber::body(Runtime::Instance::MemoryInstance *,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<int32_t> WasiFdSeek::body(Runtime::Instance::MemoryInstance *MemInst,
-                                 int32_t Fd, int64_t Offset, uint32_t Whence,
+Expect<int32_t> WasiFdSeek::body(const Runtime::CallingFrame &Frame, int32_t Fd,
+                                 int64_t Offset, uint32_t Whence,
                                  uint32_t /* Out */ NewOffsetPtr) {
-  /// Check memory instance from module.
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
@@ -901,7 +994,7 @@ Expect<int32_t> WasiFdSeek::body(Runtime::Instance::MemoryInstance *MemInst,
     WasiWhence = *Res;
   }
 
-  /// Check for invalid address.
+  // Check for invalid address.
   auto *NewOffset = MemInst->getPointer<__wasi_filesize_t *>(NewOffsetPtr);
   if (unlikely(NewOffset == nullptr)) {
     return __WASI_ERRNO_FAULT;
@@ -917,8 +1010,7 @@ Expect<int32_t> WasiFdSeek::body(Runtime::Instance::MemoryInstance *MemInst,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiFdSync::body(Runtime::Instance::MemoryInstance *,
-                                  int32_t Fd) {
+Expect<uint32_t> WasiFdSync::body(const Runtime::CallingFrame &, int32_t Fd) {
   const __wasi_fd_t WasiFd = Fd;
 
   if (auto Res = Env.fdSync(WasiFd); unlikely(!Res)) {
@@ -927,14 +1019,15 @@ Expect<uint32_t> WasiFdSync::body(Runtime::Instance::MemoryInstance *,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiFdTell::body(Runtime::Instance::MemoryInstance *MemInst,
+Expect<uint32_t> WasiFdTell::body(const Runtime::CallingFrame &Frame,
                                   int32_t Fd, uint32_t /* Out */ OffsetPtr) {
-  /// Check memory instance from module.
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
 
-  /// Check for invalid address.
+  // Check for invalid address.
   __wasi_filesize_t *Offset =
       MemInst->getPointer<__wasi_filesize_t *>(OffsetPtr);
   if (unlikely(Offset == nullptr)) {
@@ -949,11 +1042,12 @@ Expect<uint32_t> WasiFdTell::body(Runtime::Instance::MemoryInstance *MemInst,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiFdWrite::body(Runtime::Instance::MemoryInstance *MemInst,
+Expect<uint32_t> WasiFdWrite::body(const Runtime::CallingFrame &Frame,
                                    int32_t Fd, uint32_t IOVsPtr,
                                    uint32_t IOVsLen,
                                    uint32_t /* Out */ NWrittenPtr) {
-  /// Check memory instance from module.
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
@@ -963,79 +1057,75 @@ Expect<uint32_t> WasiFdWrite::body(Runtime::Instance::MemoryInstance *MemInst,
     return __WASI_ERRNO_INVAL;
   }
 
-  /// Check for invalid address.
-  auto *const IOVsArray =
-      MemInst->getPointer<__wasi_ciovec_t *>(IOVsPtr, WasiIOVsLen);
-  if (unlikely(IOVsArray == nullptr)) {
+  // Check for invalid address.
+  const auto IOVsArray =
+      MemInst->getSpan<__wasi_ciovec_t>(IOVsPtr, WasiIOVsLen);
+  if (unlikely(IOVsArray.size() != WasiIOVsLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
-  /// Check for invalid address.
+  // Check for invalid address.
   auto *const NWritten = MemInst->getPointer<__wasi_size_t *>(NWrittenPtr);
   if (unlikely(NWritten == nullptr)) {
     return __WASI_ERRNO_FAULT;
   }
 
   __wasi_size_t TotalSize = 0;
-  std::array<Span<const uint8_t>, WASI::kIOVMax> WasiIOVs;
+  StaticVector<Span<const uint8_t>, WASI::kIOVMax> WasiIOVs;
 
-  for (__wasi_size_t I = 0; I < WasiIOVsLen; ++I) {
-    __wasi_ciovec_t &IOV = IOVsArray[I];
-
-    /// Capping total size.
+  for (auto &IOV : IOVsArray) {
+    // Capping total size.
     const __wasi_size_t Space =
         std::numeric_limits<__wasi_size_t>::max() - TotalSize;
     const __wasi_size_t BufLen =
         unlikely(IOV.buf_len > Space) ? Space : IOV.buf_len;
     TotalSize += BufLen;
 
-    /// Check for invalid address.
-    auto *const WriteArr =
-        MemInst->getPointer<const uint8_t *>(IOV.buf, BufLen);
-    if (unlikely(WriteArr == nullptr)) {
+    // Check for invalid address.
+    const auto WriteArr = MemInst->getSpan<const uint8_t>(IOV.buf, BufLen);
+    if (unlikely(WriteArr.size() != BufLen)) {
       return __WASI_ERRNO_FAULT;
     }
-    WasiIOVs[I] = {WriteArr, BufLen};
+    WasiIOVs.emplace_back_unchecked(WriteArr);
   }
 
   const __wasi_fd_t WasiFd = Fd;
 
-  if (auto Res = Env.fdWrite(WasiFd, {WasiIOVs.data(), WasiIOVsLen}, *NWritten);
-      unlikely(!Res)) {
+  if (auto Res = Env.fdWrite(WasiFd, WasiIOVs, *NWritten); unlikely(!Res)) {
     return Res.error();
   }
   return __WASI_ERRNO_SUCCESS;
 }
 
 Expect<uint32_t>
-WasiPathCreateDirectory::body(Runtime::Instance::MemoryInstance *MemInst,
-                              int32_t Fd, uint32_t PathPtr, uint32_t PathLen) {
-  /// Check memory instance from module.
+WasiPathCreateDirectory::body(const Runtime::CallingFrame &Frame, int32_t Fd,
+                              uint32_t PathPtr, uint32_t PathLen) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_size_t WasiPathLen = PathLen;
-
-  auto *const Path = MemInst->getPointer<const char *>(PathPtr, WasiPathLen);
-  if (unlikely(Path == nullptr)) {
+  const auto Path = MemInst->getStringView(PathPtr, WasiPathLen);
+  if (unlikely(Path.size() != WasiPathLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_fd_t WasiFd = Fd;
 
-  if (auto Res = Env.pathCreateDirectory(WasiFd, {Path, WasiPathLen});
-      unlikely(!Res)) {
+  if (auto Res = Env.pathCreateDirectory(WasiFd, Path); unlikely(!Res)) {
     return Res.error();
   }
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t>
-WasiPathFilestatGet::body(Runtime::Instance::MemoryInstance *MemInst,
-                          int32_t Fd, uint32_t Flags, uint32_t PathPtr,
-                          uint32_t PathLen, uint32_t /* Out */ FilestatPtr) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiPathFilestatGet::body(const Runtime::CallingFrame &Frame,
+                                           int32_t Fd, uint32_t Flags,
+                                           uint32_t PathPtr, uint32_t PathLen,
+                                           uint32_t /* Out */ FilestatPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
@@ -1053,16 +1143,14 @@ WasiPathFilestatGet::body(Runtime::Instance::MemoryInstance *MemInst,
   }
 
   const __wasi_size_t WasiPathLen = PathLen;
-
-  auto *const Path = MemInst->getPointer<const char *>(PathPtr, WasiPathLen);
-  if (unlikely(Path == nullptr)) {
+  const auto Path = MemInst->getStringView(PathPtr, WasiPathLen);
+  if (unlikely(Path.size() != WasiPathLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_fd_t WasiFd = Fd;
 
-  if (auto Res = Env.pathFilestatGet(WasiFd, {Path, WasiPathLen}, WasiFlags,
-                                     *Filestat);
+  if (auto Res = Env.pathFilestatGet(WasiFd, Path, WasiFlags, *Filestat);
       unlikely(!Res)) {
     return Res.error();
   }
@@ -1070,11 +1158,12 @@ WasiPathFilestatGet::body(Runtime::Instance::MemoryInstance *MemInst,
 }
 
 Expect<uint32_t>
-WasiPathFilestatSetTimes::body(Runtime::Instance::MemoryInstance *MemInst,
-                               int32_t Fd, uint32_t Flags, uint32_t PathPtr,
+WasiPathFilestatSetTimes::body(const Runtime::CallingFrame &Frame, int32_t Fd,
+                               uint32_t Flags, uint32_t PathPtr,
                                uint32_t PathLen, uint64_t ATim, uint64_t MTim,
                                uint32_t FstFlags) {
-  /// Check memory instance from module.
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
@@ -1094,9 +1183,8 @@ WasiPathFilestatSetTimes::body(Runtime::Instance::MemoryInstance *MemInst,
   }
 
   const __wasi_size_t WasiPathLen = PathLen;
-
-  auto *const Path = MemInst->getPointer<const char *>(PathPtr, WasiPathLen);
-  if (unlikely(Path == nullptr)) {
+  const auto Path = MemInst->getStringView(PathPtr, WasiPathLen);
+  if (unlikely(Path.size() != WasiPathLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
@@ -1104,21 +1192,21 @@ WasiPathFilestatSetTimes::body(Runtime::Instance::MemoryInstance *MemInst,
   const __wasi_timestamp_t WasiATim = ATim;
   const __wasi_timestamp_t WasiMTim = MTim;
 
-  if (auto Res =
-          Env.pathFilestatSetTimes(WasiFd, {Path, WasiPathLen}, WasiFlags,
-                                   WasiATim, WasiMTim, WasiFstFlags);
+  if (auto Res = Env.pathFilestatSetTimes(WasiFd, Path, WasiFlags, WasiATim,
+                                          WasiMTim, WasiFstFlags);
       unlikely(!Res)) {
     return Res.error();
   }
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiPathLink::body(Runtime::Instance::MemoryInstance *MemInst,
+Expect<uint32_t> WasiPathLink::body(const Runtime::CallingFrame &Frame,
                                     int32_t OldFd, uint32_t OldFlags,
                                     uint32_t OldPathPtr, uint32_t OldPathLen,
                                     int32_t NewFd, uint32_t NewPathPtr,
                                     uint32_t NewPathLen) {
-  /// Check memory instance from module.
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
@@ -1131,40 +1219,34 @@ Expect<uint32_t> WasiPathLink::body(Runtime::Instance::MemoryInstance *MemInst,
   }
 
   const __wasi_size_t WasiOldPathLen = OldPathLen;
-
-  auto *const OldPath =
-      MemInst->getPointer<const char *>(OldPathPtr, WasiOldPathLen);
-  if (unlikely(OldPath == nullptr)) {
+  const auto OldPath = MemInst->getStringView(OldPathPtr, WasiOldPathLen);
+  if (unlikely(OldPath.size() != WasiOldPathLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_size_t WasiNewPathLen = NewPathLen;
-
-  auto *const NewPath =
-      MemInst->getPointer<const char *>(NewPathPtr, WasiNewPathLen);
-  if (unlikely(NewPath == nullptr)) {
+  const auto NewPath = MemInst->getStringView(NewPathPtr, WasiNewPathLen);
+  if (unlikely(NewPath.size() != WasiNewPathLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_fd_t WasiOldFd = OldFd;
   const __wasi_fd_t WasinewFd = NewFd;
 
-  if (auto Res = Env.pathLink(WasiOldFd, {OldPath, WasiOldPathLen}, WasinewFd,
-                              {NewPath, WasiNewPathLen}, WasiOldFlags);
+  if (auto Res =
+          Env.pathLink(WasiOldFd, OldPath, WasinewFd, NewPath, WasiOldFlags);
       unlikely(!Res)) {
     return Res.error();
   }
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiPathOpen::body(Runtime::Instance::MemoryInstance *MemInst,
-                                    int32_t DirFd, uint32_t DirFlags,
-                                    uint32_t PathPtr, uint32_t PathLen,
-                                    uint32_t OFlags, uint64_t FsRightsBase,
-                                    uint64_t FsRightsInheriting,
-                                    uint32_t FsFlags,
-                                    uint32_t /* Out */ FdPtr) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiPathOpen::body(
+    const Runtime::CallingFrame &Frame, int32_t DirFd, uint32_t DirFlags,
+    uint32_t PathPtr, uint32_t PathLen, uint32_t OFlags, uint64_t FsRightsBase,
+    uint64_t FsRightsInheriting, uint32_t FsFlags, uint32_t /* Out */ FdPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
@@ -1205,9 +1287,8 @@ Expect<uint32_t> WasiPathOpen::body(Runtime::Instance::MemoryInstance *MemInst,
   }
 
   const __wasi_size_t WasiPathLen = PathLen;
-
-  auto *const Path = MemInst->getPointer<const char *>(PathPtr, WasiPathLen);
-  if (unlikely(Path == nullptr)) {
+  const auto Path = MemInst->getStringView(PathPtr, WasiPathLen);
+  if (unlikely(Path.size() != WasiPathLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
@@ -1216,10 +1297,17 @@ Expect<uint32_t> WasiPathOpen::body(Runtime::Instance::MemoryInstance *MemInst,
     return __WASI_ERRNO_FAULT;
   }
 
+  // Open directory and read/write rights should fail with isdir
+  if ((WasiOFlags & __WASI_OFLAGS_DIRECTORY) &&
+      (WasiFsRightsBase & __WASI_RIGHTS_FD_READ) &&
+      (WasiFsRightsBase & __WASI_RIGHTS_FD_WRITE)) {
+    return __WASI_ERRNO_ISDIR;
+  }
+
   const __wasi_fd_t WasiDirFd = DirFd;
 
   if (auto Res =
-          Env.pathOpen(WasiDirFd, {Path, WasiPathLen}, WasiDirFlags, WasiOFlags,
+          Env.pathOpen(WasiDirFd, Path, WasiDirFlags, WasiOFlags,
                        WasiFsRightsBase, WasiFsRightsInheriting, WasiFsFlags);
       unlikely(!Res)) {
     return Res.error();
@@ -1229,26 +1317,27 @@ Expect<uint32_t> WasiPathOpen::body(Runtime::Instance::MemoryInstance *MemInst,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t>
-WasiPathReadLink::body(Runtime::Instance::MemoryInstance *MemInst, int32_t Fd,
-                       uint32_t PathPtr, uint32_t PathLen, uint32_t BufPtr,
-                       uint32_t BufLen, uint32_t /* Out */ NReadPtr) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiPathReadLink::body(const Runtime::CallingFrame &Frame,
+                                        int32_t Fd, uint32_t PathPtr,
+                                        uint32_t PathLen, uint32_t BufPtr,
+                                        uint32_t BufLen,
+                                        uint32_t /* Out */ NReadPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_size_t WasiPathLen = PathLen;
-
-  auto *const Path = MemInst->getPointer<const char *>(PathPtr, WasiPathLen);
-  if (unlikely(Path == nullptr)) {
+  const auto Path = MemInst->getStringView(PathPtr, WasiPathLen);
+  if (unlikely(Path.size() != WasiPathLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_size_t WasiBufLen = BufLen;
 
-  auto *const Buf = MemInst->getPointer<char *>(BufPtr, WasiBufLen);
-  if (unlikely(Buf == nullptr)) {
+  const auto Buf = MemInst->getSpan<char>(BufPtr, WasiBufLen);
+  if (unlikely(Buf.size() != WasiBufLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
@@ -1259,153 +1348,144 @@ WasiPathReadLink::body(Runtime::Instance::MemoryInstance *MemInst, int32_t Fd,
 
   const __wasi_fd_t WasiFd = Fd;
 
-  if (auto Res = Env.pathReadlink(WasiFd, {Path, WasiPathLen},
-                                  {Buf, WasiBufLen}, *NRead);
-      unlikely(!Res)) {
+  if (auto Res = Env.pathReadlink(WasiFd, Path, Buf, *NRead); unlikely(!Res)) {
     return Res.error();
   }
   return __WASI_ERRNO_SUCCESS;
 }
 
 Expect<uint32_t>
-WasiPathRemoveDirectory::body(Runtime::Instance::MemoryInstance *MemInst,
-                              int32_t Fd, uint32_t PathPtr, uint32_t PathLen) {
-  /// Check memory instance from module.
+WasiPathRemoveDirectory::body(const Runtime::CallingFrame &Frame, int32_t Fd,
+                              uint32_t PathPtr, uint32_t PathLen) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_size_t WasiPathLen = PathLen;
-
-  auto *const Path = MemInst->getPointer<const char *>(PathPtr, WasiPathLen);
-  if (unlikely(Path == nullptr)) {
+  const auto Path = MemInst->getStringView(PathPtr, WasiPathLen);
+  if (unlikely(Path.size() != WasiPathLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_fd_t WasiFd = Fd;
 
-  if (auto Res = Env.pathRemoveDirectory(WasiFd, {Path, WasiPathLen});
-      unlikely(!Res)) {
+  if (auto Res = Env.pathRemoveDirectory(WasiFd, Path); unlikely(!Res)) {
     return Res.error();
   }
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t>
-WasiPathRename::body(Runtime::Instance::MemoryInstance *MemInst, int32_t Fd,
-                     uint32_t OldPathPtr, uint32_t OldPathLen, int32_t NewFd,
-                     uint32_t NewPathPtr, uint32_t NewPathLen) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiPathRename::body(const Runtime::CallingFrame &Frame,
+                                      int32_t Fd, uint32_t OldPathPtr,
+                                      uint32_t OldPathLen, int32_t NewFd,
+                                      uint32_t NewPathPtr,
+                                      uint32_t NewPathLen) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_size_t WasiOldPathLen = OldPathLen;
-
-  auto *const OldPath =
-      MemInst->getPointer<const char *>(OldPathPtr, WasiOldPathLen);
-  if (unlikely(OldPath == nullptr)) {
+  const auto OldPath = MemInst->getStringView(OldPathPtr, WasiOldPathLen);
+  if (unlikely(OldPath.size() != WasiOldPathLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_size_t WasiNewPathLen = NewPathLen;
-
-  auto *const NewPath =
-      MemInst->getPointer<const char *>(NewPathPtr, WasiNewPathLen);
-  if (unlikely(NewPath == nullptr)) {
+  const auto NewPath = MemInst->getStringView(NewPathPtr, WasiNewPathLen);
+  if (unlikely(NewPath.size() != WasiNewPathLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_fd_t WasiFd = Fd;
   const __wasi_fd_t WasiNewFd = NewFd;
 
-  if (auto Res = Env.pathRename(WasiFd, {OldPath, WasiOldPathLen}, WasiNewFd,
-                                {NewPath, WasiNewPathLen});
+  if (auto Res = Env.pathRename(WasiFd, OldPath, WasiNewFd, NewPath);
       unlikely(!Res)) {
     return Res.error();
   }
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t>
-WasiPathSymlink::body(Runtime::Instance::MemoryInstance *MemInst,
-                      uint32_t OldPathPtr, uint32_t OldPathLen, int32_t Fd,
-                      uint32_t NewPathPtr, uint32_t NewPathLen) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiPathSymlink::body(const Runtime::CallingFrame &Frame,
+                                       uint32_t OldPathPtr, uint32_t OldPathLen,
+                                       int32_t Fd, uint32_t NewPathPtr,
+                                       uint32_t NewPathLen) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_size_t WasiOldPathLen = OldPathLen;
-
-  auto *const OldPath =
-      MemInst->getPointer<const char *>(OldPathPtr, WasiOldPathLen);
-  if (unlikely(OldPath == nullptr)) {
+  const auto OldPath = MemInst->getStringView(OldPathPtr, WasiOldPathLen);
+  if (unlikely(OldPath.size() != WasiOldPathLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_size_t WasiNewPathLen = NewPathLen;
-
-  auto *const NewPath =
-      MemInst->getPointer<const char *>(NewPathPtr, WasiNewPathLen);
-  if (unlikely(NewPath == nullptr)) {
+  const auto NewPath = MemInst->getStringView(NewPathPtr, WasiNewPathLen);
+  if (unlikely(NewPath.size() != WasiNewPathLen)) {
     return __WASI_ERRNO_FAULT;
+  }
+
+  if (OldPath.empty() || NewPath.empty()) {
+    return __WASI_ERRNO_NOENT;
   }
 
   const __wasi_fd_t WasiFd = Fd;
 
-  if (auto Res = Env.pathSymlink({OldPath, WasiOldPathLen}, WasiFd,
-                                 {NewPath, WasiNewPathLen});
-      unlikely(!Res)) {
+  if (auto Res = Env.pathSymlink(OldPath, WasiFd, NewPath); unlikely(!Res)) {
     return Res.error();
   }
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t>
-WasiPathUnlinkFile::body(Runtime::Instance::MemoryInstance *MemInst, int32_t Fd,
-                         uint32_t PathPtr, uint32_t PathLen) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiPathUnlinkFile::body(const Runtime::CallingFrame &Frame,
+                                          int32_t Fd, uint32_t PathPtr,
+                                          uint32_t PathLen) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_size_t WasiPathLen = PathLen;
-
-  auto *const Path = MemInst->getPointer<const char *>(PathPtr, WasiPathLen);
-  if (unlikely(Path == nullptr)) {
+  const auto Path = MemInst->getStringView(PathPtr, WasiPathLen);
+  if (unlikely(Path.size() != WasiPathLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_fd_t WasiFd = Fd;
 
-  if (auto Res = Env.pathUnlinkFile(WasiFd, {Path, WasiPathLen});
-      unlikely(!Res)) {
+  if (auto Res = Env.pathUnlinkFile(WasiFd, Path); unlikely(!Res)) {
     return Res.error();
   }
   return __WASI_ERRNO_SUCCESS;
 }
-
-Expect<uint32_t>
-WasiPollOneoff::body(Runtime::Instance::MemoryInstance *MemInst, uint32_t InPtr,
-                     uint32_t OutPtr, uint32_t NSubscriptions,
-                     uint32_t /* Out */ NEventsPtr) {
-  /// Check memory instance from module.
+template <WASI::TriggerType Trigger>
+Expect<uint32_t> WasiPollOneoff<Trigger>::body(
+    const Runtime::CallingFrame &Frame, uint32_t InPtr, uint32_t OutPtr,
+    uint32_t NSubscriptions, uint32_t /* Out */ NEventsPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_size_t WasiNSub = NSubscriptions;
 
-  auto *const SubscriptionArray =
-      MemInst->getPointer<const __wasi_subscription_t *>(InPtr, WasiNSub);
-  if (unlikely(SubscriptionArray == nullptr)) {
+  const auto Subs =
+      MemInst->getSpan<const __wasi_subscription_t>(InPtr, WasiNSub);
+  if (unlikely(Subs.size() != WasiNSub)) {
     return __WASI_ERRNO_FAULT;
   }
 
-  auto *const EventArray =
-      MemInst->getPointer<__wasi_event_t *>(OutPtr, WasiNSub);
-  if (unlikely(EventArray == nullptr)) {
+  const auto Events = MemInst->getSpan<__wasi_event_t>(OutPtr, WasiNSub);
+  if (unlikely(Events.size() != WasiNSub)) {
     return __WASI_ERRNO_FAULT;
   }
 
@@ -1414,38 +1494,23 @@ WasiPollOneoff::body(Runtime::Instance::MemoryInstance *MemInst, uint32_t InPtr,
     return __WASI_ERRNO_FAULT;
   }
 
-  __wasi_size_t EventCount = 0;
-
-  if (auto Poll = Env.pollOneoff(WasiNSub); unlikely(!Poll)) {
+  // Validate contents
+  if (auto Poll = this->Env.acquirePoller(Events); unlikely(!Poll)) {
+    for (__wasi_size_t I = 0; I < WasiNSub; ++I) {
+      Events[I].userdata = Subs[I].userdata;
+      Events[I].error = Poll.error();
+      Events[I].type = Subs[I].u.tag;
+    }
+    *NEvents = WasiNSub;
     return Poll.error();
   } else {
-    /// Validate contents
-    const Span<const __wasi_subscription_t> Subs(SubscriptionArray, WasiNSub);
-    Span<__wasi_event_t> Events(EventArray, WasiNSub);
-    auto Record = [&Events, &EventCount](
-                      __wasi_userdata_t UserData, __wasi_errno_t Errno,
-                      __wasi_eventtype_t EventType, __wasi_filesize_t NBytes,
-                      __wasi_eventrwflags_t Flags) {
-      auto &Event = Events[EventCount];
-      Event.userdata = UserData;
-      Event.error = Errno;
-      Event.type = EventType;
-      if (Errno == __WASI_ERRNO_SUCCESS &&
-          (EventType &
-           (__WASI_EVENTTYPE_FD_READ | __WASI_EVENTTYPE_FD_WRITE))) {
-        Event.fd_readwrite.nbytes = NBytes;
-        Event.fd_readwrite.flags = Flags;
-      }
-      ++EventCount;
-    };
+    auto &Poller = *Poll;
     for (auto &Sub : Subs) {
       const __wasi_userdata_t WasiUserData = Sub.userdata;
-      const __wasi_eventrwflags_t NoFlags =
-          static_cast<__wasi_eventrwflags_t>(0);
 
       __wasi_eventtype_t Type;
       if (auto Res = cast<__wasi_eventtype_t>(Sub.u.tag); unlikely(!Res)) {
-        Record(WasiUserData, Res.error(), Sub.u.tag, 0, NoFlags);
+        Poller.error(WasiUserData, Res.error(), Sub.u.tag);
         continue;
       } else {
         Type = *Res;
@@ -1456,7 +1521,7 @@ WasiPollOneoff::body(Runtime::Instance::MemoryInstance *MemInst, uint32_t InPtr,
         __wasi_clockid_t WasiClockId;
         if (auto Res = cast<__wasi_clockid_t>(Sub.u.u.clock.id);
             unlikely(!Res)) {
-          Record(WasiUserData, Res.error(), Sub.u.tag, 0, NoFlags);
+          Poller.error(WasiUserData, Res.error(), Type);
           continue;
         } else {
           WasiClockId = *Res;
@@ -1465,7 +1530,7 @@ WasiPollOneoff::body(Runtime::Instance::MemoryInstance *MemInst, uint32_t InPtr,
         __wasi_subclockflags_t WasiFlags;
         if (auto Res = cast<__wasi_subclockflags_t>(Sub.u.u.clock.flags);
             unlikely(!Res)) {
-          Record(WasiUserData, Res.error(), Sub.u.tag, 0, NoFlags);
+          Poller.error(WasiUserData, Res.error(), Type);
           continue;
         } else {
           WasiFlags = *Res;
@@ -1474,48 +1539,43 @@ WasiPollOneoff::body(Runtime::Instance::MemoryInstance *MemInst, uint32_t InPtr,
         const __wasi_timestamp_t WasiTimeout = Sub.u.u.clock.timeout;
         const __wasi_timestamp_t WasiPrecision = Sub.u.u.clock.precision;
 
-        if (auto Res = Poll->clock(WasiClockId, WasiTimeout, WasiPrecision,
-                                   WasiFlags, WasiUserData);
-            unlikely(!Res)) {
-          Record(WasiUserData, Res.error(), Sub.u.tag, 0, NoFlags);
-        }
+        Poller.clock(WasiClockId, WasiTimeout, WasiPrecision, WasiFlags,
+                     WasiUserData);
         continue;
       }
       case __WASI_EVENTTYPE_FD_READ: {
         const __wasi_fd_t WasiFd = Sub.u.u.fd_read.file_descriptor;
-        if (auto Res = Poll->read(WasiFd, WasiUserData); unlikely(!Res)) {
-          Record(WasiUserData, Res.error(), Sub.u.tag, 0, NoFlags);
-        }
+        Poller.read(WasiFd, Trigger, WasiUserData);
         continue;
       }
       case __WASI_EVENTTYPE_FD_WRITE: {
         const __wasi_fd_t WasiFd = Sub.u.u.fd_write.file_descriptor;
-        if (auto Res = Poll->write(WasiFd, WasiUserData); unlikely(!Res)) {
-          Record(WasiUserData, Res.error(), Sub.u.tag, 0, NoFlags);
-        }
+        Poller.write(WasiFd, Trigger, WasiUserData);
         continue;
       }
       default:
-        __builtin_unreachable();
+        assumingUnreachable();
       }
     }
-
-    if (auto Res = Poll->wait(Record); unlikely(!Res)) {
-      return Res.error();
-    }
+    Poller.wait();
+    *NEvents = Poller.result();
+    Poller.reset();
+    this->Env.releasePoller(std::move(Poller));
   }
 
-  *NEvents = EventCount;
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<void> WasiProcExit::body(Runtime::Instance::MemoryInstance *,
+template class WasiPollOneoff<WASI::TriggerType::Level>;
+template class WasiPollOneoff<WASI::TriggerType::Edge>;
+
+Expect<void> WasiProcExit::body(const Runtime::CallingFrame &,
                                 uint32_t ExitCode) {
   Env.procExit(ExitCode);
-  return Unexpect(ErrCode::Terminated);
+  return Unexpect(ErrCode::Value::Terminated);
 }
 
-Expect<uint32_t> WasiProcRaise::body(Runtime::Instance::MemoryInstance *,
+Expect<uint32_t> WasiProcRaise::body(const Runtime::CallingFrame &,
                                      uint32_t Signal) {
   __wasi_signal_t WasiSignal;
   if (auto Res = cast<__wasi_signal_t>(Signal); unlikely(!Res)) {
@@ -1530,43 +1590,44 @@ Expect<uint32_t> WasiProcRaise::body(Runtime::Instance::MemoryInstance *,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiSchedYield::body(Runtime::Instance::MemoryInstance *) {
+Expect<uint32_t> WasiSchedYield::body(const Runtime::CallingFrame &) {
   if (auto Res = Env.schedYield(); unlikely(!Res)) {
     return Res.error();
   }
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiRandomGet::body(Runtime::Instance::MemoryInstance *MemInst,
+Expect<uint32_t> WasiRandomGet::body(const Runtime::CallingFrame &Frame,
                                      uint32_t BufPtr, uint32_t BufLen) {
-  /// Check memory instance from module.
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
 
   const __wasi_size_t WasiBufLen = BufLen;
 
-  auto *const Buf = MemInst->getPointer<uint8_t *>(BufPtr, WasiBufLen);
-  if (unlikely(Buf == nullptr)) {
+  const auto Buf = MemInst->getSpan<uint8_t>(BufPtr, WasiBufLen);
+  if (unlikely(Buf.size() != WasiBufLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
-  if (auto Res = Env.randomGet({Buf, WasiBufLen}); unlikely(!Res)) {
+  if (auto Res = Env.randomGet(Buf); unlikely(!Res)) {
     return Res.error();
   }
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiSockOpen::body(Runtime::Instance::MemoryInstance *MemInst,
-                                    int32_t AddressFamily, int32_t SockType,
-                                    uint32_t /* Out */ RoFdPtr) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiSockOpenV1::body(const Runtime::CallingFrame &Frame,
+                                      uint32_t AddressFamily, uint32_t SockType,
+                                      uint32_t /* Out */ RoFdPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
 
-  __wasi_fd_t *const RoFd =
-      MemInst->getPointer<__wasi_fd_t *>(RoFdPtr, sizeof(__wasi_fd_t));
+  __wasi_fd_t *const RoFd = MemInst->getPointer<__wasi_fd_t *>(RoFdPtr);
   if (RoFd == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
@@ -1576,6 +1637,10 @@ Expect<uint32_t> WasiSockOpen::body(Runtime::Instance::MemoryInstance *MemInst,
     return Res.error();
   } else {
     WasiAddressFamily = *Res;
+  }
+
+  if (!AllowAFUNIX(Frame, WasiAddressFamily)) {
+    return __WASI_ERRNO_NOSYS;
   }
 
   __wasi_sock_type_t WasiSockType;
@@ -1595,31 +1660,41 @@ Expect<uint32_t> WasiSockOpen::body(Runtime::Instance::MemoryInstance *MemInst,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiSockBind::body(Runtime::Instance::MemoryInstance *MemInst,
-                                    int32_t Fd, uint32_t AddressPtr,
-                                    uint32_t Port) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiSockBindV1::body(const Runtime::CallingFrame &Frame,
+                                      int32_t Fd, uint32_t AddressPtr,
+                                      uint32_t Port) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
-  __wasi_address_t *InnerAddress = MemInst->getPointer<__wasi_address_t *>(
-      AddressPtr, sizeof(__wasi_address_t));
+  __wasi_address_t *InnerAddress =
+      MemInst->getPointer<__wasi_address_t *>(AddressPtr);
   if (InnerAddress == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
 
-  if (InnerAddress->buf_len != 4 && InnerAddress->buf_len != 16) {
+  const auto Address =
+      MemInst->getSpan<const uint8_t>(InnerAddress->buf, InnerAddress->buf_len);
+  if (Address.size() != InnerAddress->buf_len) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_address_family_t WasiAddressFamily;
+  switch (Address.size()) {
+  case 4:
+    WasiAddressFamily = __WASI_ADDRESS_FAMILY_INET4;
+    break;
+  case 16:
+    WasiAddressFamily = __WASI_ADDRESS_FAMILY_INET6;
+    break;
+  default:
     return __WASI_ERRNO_INVAL;
   }
 
-  uint8_t *AddressBuf = MemInst->getPointer<uint8_t *>(
-      InnerAddress->buf, sizeof(uint8_t) * InnerAddress->buf_len);
-  if (AddressBuf == nullptr) {
-    return __WASI_ERRNO_FAULT;
-  }
   const __wasi_fd_t WasiFd = Fd;
 
-  if (auto Res = Env.sockBind(WasiFd, AddressBuf, InnerAddress->buf_len,
+  if (auto Res = Env.sockBind(WasiFd, WasiAddressFamily, Address,
                               static_cast<uint16_t>(Port));
       unlikely(!Res)) {
     return Res.error();
@@ -1627,9 +1702,8 @@ Expect<uint32_t> WasiSockBind::body(Runtime::Instance::MemoryInstance *MemInst,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiSockListen::body(
-    [[maybe_unused]] Runtime::Instance::MemoryInstance *MemInst, int32_t Fd,
-    uint32_t Backlog) {
+Expect<uint32_t> WasiSockListenV1::body(const Runtime::CallingFrame &,
+                                        int32_t Fd, int32_t Backlog) {
   const __wasi_fd_t WasiFd = Fd;
   if (auto Res = Env.sockListen(WasiFd, Backlog); unlikely(!Res)) {
     return Res.error();
@@ -1637,22 +1711,21 @@ Expect<uint32_t> WasiSockListen::body(
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t>
-WasiSockAccept::body(Runtime::Instance::MemoryInstance *MemInst, int32_t Fd,
-                     int32_t Port, uint32_t /* Out */ RoFdPtr) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiSockAcceptV1::body(const Runtime::CallingFrame &Frame,
+                                        int32_t Fd,
+                                        uint32_t /* Out */ RoFdPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
-  __wasi_fd_t *const RoFd =
-      MemInst->getPointer<__wasi_fd_t *>(RoFdPtr, sizeof(__wasi_fd_t));
+  __wasi_fd_t *const RoFd = MemInst->getPointer<__wasi_fd_t *>(RoFdPtr);
   if (RoFd == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
   const __wasi_fd_t WasiFd = Fd;
-
-  if (auto Res = Env.sockAccept(WasiFd, static_cast<uint16_t>(Port));
-      unlikely(!Res)) {
+  const __wasi_fdflags_t WasiFdFlags = static_cast<__wasi_fdflags_t>(0);
+  if (auto Res = Env.sockAccept(WasiFd, WasiFdFlags); unlikely(!Res)) {
     return Res.error();
   } else {
     *RoFd = *Res;
@@ -1661,32 +1734,71 @@ WasiSockAccept::body(Runtime::Instance::MemoryInstance *MemInst, int32_t Fd,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t>
-WasiSockConnect::body(Runtime::Instance::MemoryInstance *MemInst, int32_t Fd,
-                      uint32_t AddressPtr, uint32_t Port) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiSockAcceptV2::body(const Runtime::CallingFrame &Frame,
+                                        int32_t Fd, uint32_t FsFlags,
+                                        uint32_t /* Out */ RoFdPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
-  __wasi_address_t *InnerAddress = MemInst->getPointer<__wasi_address_t *>(
-      AddressPtr, sizeof(__wasi_address_t));
+  __wasi_fd_t *const RoFd = MemInst->getPointer<__wasi_fd_t *>(RoFdPtr);
+  if (RoFd == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+  const __wasi_fd_t WasiFd = Fd;
+
+  __wasi_fdflags_t WasiFdFlags;
+  if (auto Res = cast<__wasi_fdflags_t>(FsFlags); unlikely(!Res)) {
+    return Res.error();
+  } else {
+    WasiFdFlags = *Res;
+  }
+
+  if (auto Res = Env.sockAccept(WasiFd, WasiFdFlags); unlikely(!Res)) {
+    return Res.error();
+  } else {
+    *RoFd = *Res;
+  }
+
+  return __WASI_ERRNO_SUCCESS;
+}
+
+Expect<uint32_t> WasiSockConnectV1::body(const Runtime::CallingFrame &Frame,
+                                         int32_t Fd, uint32_t AddressPtr,
+                                         uint32_t Port) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
+  if (MemInst == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+  __wasi_address_t *InnerAddress =
+      MemInst->getPointer<__wasi_address_t *>(AddressPtr);
   if (InnerAddress == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
 
-  if (InnerAddress->buf_len != 4 && InnerAddress->buf_len != 16) {
-    return __WASI_ERRNO_INVAL;
-  }
-
-  uint8_t *AddressBuf = MemInst->getPointer<uint8_t *>(
-      InnerAddress->buf, sizeof(uint8_t) * InnerAddress->buf_len);
-  if (AddressBuf == nullptr) {
+  const auto Address =
+      MemInst->getSpan<uint8_t>(InnerAddress->buf, InnerAddress->buf_len);
+  if (Address.size() != InnerAddress->buf_len) {
     return __WASI_ERRNO_FAULT;
   }
 
+  __wasi_address_family_t WasiAddressFamily;
+  switch (Address.size()) {
+  case 4:
+    WasiAddressFamily = __WASI_ADDRESS_FAMILY_INET4;
+    break;
+  case 16:
+    WasiAddressFamily = __WASI_ADDRESS_FAMILY_INET6;
+    break;
+  default:
+    return __WASI_ERRNO_INVAL;
+  }
+
   const __wasi_fd_t WasiFd = Fd;
-  if (auto Res =
-          Env.sockConnect(WasiFd, AddressBuf, InnerAddress->buf_len, Port);
+  if (auto Res = Env.sockConnect(WasiFd, WasiAddressFamily, Address,
+                                 static_cast<uint16_t>(Port));
       unlikely(!Res)) {
     return Res.error();
   }
@@ -1694,12 +1806,13 @@ WasiSockConnect::body(Runtime::Instance::MemoryInstance *MemInst, int32_t Fd,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiSockRecv::body(Runtime::Instance::MemoryInstance *MemInst,
-                                    int32_t Fd, uint32_t RiDataPtr,
-                                    uint32_t RiDataLen, uint32_t RiFlags,
-                                    uint32_t /* Out */ RoDataLenPtr,
-                                    uint32_t /* Out */ RoFlagsPtr) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiSockRecvV1::body(const Runtime::CallingFrame &Frame,
+                                      int32_t Fd, uint32_t RiDataPtr,
+                                      uint32_t RiDataLen, uint32_t RiFlags,
+                                      uint32_t /* Out */ RoDataLenPtr,
+                                      uint32_t /* Out */ RoFlagsPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
@@ -1716,10 +1829,10 @@ Expect<uint32_t> WasiSockRecv::body(Runtime::Instance::MemoryInstance *MemInst,
     return __WASI_ERRNO_INVAL;
   }
 
-  /// Check for invalid address.
-  auto *const RiDataArray =
-      MemInst->getPointer<__wasi_iovec_t *>(RiDataPtr, WasiRiDataLen);
-  if (unlikely(RiDataArray == nullptr)) {
+  // Check for invalid address.
+  const auto RiDataArray =
+      MemInst->getSpan<__wasi_iovec_t>(RiDataPtr, WasiRiDataLen);
+  if (unlikely(RiDataArray.size() != WasiRiDataLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
@@ -1733,31 +1846,29 @@ Expect<uint32_t> WasiSockRecv::body(Runtime::Instance::MemoryInstance *MemInst,
     return __WASI_ERRNO_FAULT;
   }
   __wasi_size_t TotalSize = 0;
-  std::array<Span<uint8_t>, WASI::kIOVMax> WasiRiData;
+  StaticVector<Span<uint8_t>, WASI::kIOVMax> WasiRiData;
 
-  for (__wasi_size_t I = 0; I < WasiRiDataLen; ++I) {
-    __wasi_iovec_t &RiData = RiDataArray[I];
-
-    /// Capping total size.
+  for (auto &RiData : RiDataArray) {
+    // Capping total size.
     const __wasi_size_t Space =
         std::numeric_limits<__wasi_size_t>::max() - TotalSize;
     const __wasi_size_t BufLen =
         unlikely(RiData.buf_len > Space) ? Space : RiData.buf_len;
     TotalSize += BufLen;
 
-    /// Check for invalid address.
-    auto *const RiDataArr = MemInst->getPointer<uint8_t *>(RiData.buf, BufLen);
-    /// Check for invalid address.
-    if (unlikely(RiDataArr == nullptr)) {
+    // Check for invalid address.
+    const auto RiDataArr = MemInst->getSpan<uint8_t>(RiData.buf, BufLen);
+    // Check for invalid address.
+    if (unlikely(RiDataArr.size() != BufLen)) {
       return __WASI_ERRNO_FAULT;
     }
-    WasiRiData[I] = {RiDataArr, BufLen};
+    WasiRiData.emplace_back_unchecked(RiDataArr);
   }
 
   const __wasi_fd_t WasiFd = Fd;
 
-  if (auto Res = Env.sockRecv(WasiFd, {WasiRiData.data(), WasiRiDataLen},
-                              WasiRiFlags, *RoDataLen, *RoFlags);
+  if (auto Res =
+          Env.sockRecv(WasiFd, WasiRiData, WasiRiFlags, *RoDataLen, *RoFlags);
       unlikely(!Res)) {
     return Res.error();
   }
@@ -1765,11 +1876,94 @@ Expect<uint32_t> WasiSockRecv::body(Runtime::Instance::MemoryInstance *MemInst,
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiSockSend::body(Runtime::Instance::MemoryInstance *MemInst,
-                                    int32_t Fd, uint32_t SiDataPtr,
-                                    uint32_t SiDataLen, uint32_t SiFlags,
-                                    uint32_t /* Out */ SoDataLenPtr) {
-  /// Check memory instance from module.
+Expect<uint32_t> WasiSockRecvFromV1::body(const Runtime::CallingFrame &Frame,
+                                          int32_t Fd, uint32_t RiDataPtr,
+                                          uint32_t RiDataLen,
+                                          uint32_t AddressPtr, uint32_t RiFlags,
+                                          uint32_t /* Out */ RoDataLenPtr,
+                                          uint32_t /* Out */ RoFlagsPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
+  if (MemInst == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_address_t *InnerAddress =
+      MemInst->getPointer<__wasi_address_t *>(AddressPtr);
+  if (InnerAddress == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  const auto Address =
+      MemInst->getSpan<uint8_t>(InnerAddress->buf, InnerAddress->buf_len);
+  if (Address.size() != InnerAddress->buf_len) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_riflags_t WasiRiFlags;
+  if (auto Res = cast<__wasi_riflags_t>(RiFlags); unlikely(!Res)) {
+    return Res.error();
+  } else {
+    WasiRiFlags = *Res;
+  }
+
+  const __wasi_size_t WasiRiDataLen = RiDataLen;
+  if (unlikely(WasiRiDataLen > WASI::kIOVMax)) {
+    return __WASI_ERRNO_INVAL;
+  }
+
+  const auto RiDataArray =
+      MemInst->getSpan<__wasi_iovec_t>(RiDataPtr, WasiRiDataLen);
+  if (unlikely(RiDataArray.size() != WasiRiDataLen)) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  auto *const RoDataLen = MemInst->getPointer<__wasi_size_t *>(RoDataLenPtr);
+  if (unlikely(RoDataLen == nullptr)) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  auto *const RoFlags = MemInst->getPointer<__wasi_roflags_t *>(RoFlagsPtr);
+  if (unlikely(RoFlags == nullptr)) {
+    return __WASI_ERRNO_FAULT;
+  }
+  __wasi_size_t TotalSize = 0;
+  StaticVector<Span<uint8_t>, WASI::kIOVMax> WasiRiData;
+
+  for (auto &RiData : RiDataArray) {
+    // Capping total size.
+    const __wasi_size_t Space =
+        std::numeric_limits<__wasi_size_t>::max() - TotalSize;
+    const __wasi_size_t BufLen =
+        unlikely(RiData.buf_len > Space) ? Space : RiData.buf_len;
+    TotalSize += BufLen;
+
+    // Check for invalid address.
+    const auto RiDataArr = MemInst->getSpan<uint8_t>(RiData.buf, BufLen);
+    // Check for invalid address.
+    if (unlikely(RiDataArr.size() != BufLen)) {
+      return __WASI_ERRNO_FAULT;
+    }
+    WasiRiData.emplace_back_unchecked(RiDataArr);
+  }
+
+  const __wasi_fd_t WasiFd = Fd;
+
+  if (auto Res = Env.sockRecvFrom(WasiFd, WasiRiData, WasiRiFlags, nullptr,
+                                  Address, nullptr, *RoDataLen, *RoFlags);
+      unlikely(!Res)) {
+    return Res.error();
+  }
+
+  return __WASI_ERRNO_SUCCESS;
+}
+
+Expect<uint32_t> WasiSockSendV1::body(const Runtime::CallingFrame &Frame,
+                                      int32_t Fd, uint32_t SiDataPtr,
+                                      uint32_t SiDataLen, uint32_t SiFlags,
+                                      uint32_t /* Out */ SoDataLenPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
   if (MemInst == nullptr) {
     return __WASI_ERRNO_FAULT;
   }
@@ -1786,10 +1980,10 @@ Expect<uint32_t> WasiSockSend::body(Runtime::Instance::MemoryInstance *MemInst,
     return __WASI_ERRNO_INVAL;
   }
 
-  /// Check for invalid address.
-  auto *const SiDataArray =
-      MemInst->getPointer<__wasi_ciovec_t *>(SiDataPtr, WasiSiDataLen);
-  if (unlikely(SiDataArray == nullptr)) {
+  // Check for invalid address.
+  const auto SiDataArray =
+      MemInst->getSpan<__wasi_ciovec_t>(SiDataPtr, WasiSiDataLen);
+  if (unlikely(SiDataArray.size() != WasiSiDataLen)) {
     return __WASI_ERRNO_FAULT;
   }
 
@@ -1799,38 +1993,124 @@ Expect<uint32_t> WasiSockSend::body(Runtime::Instance::MemoryInstance *MemInst,
   }
 
   __wasi_size_t TotalSize = 0;
-  std::array<Span<const uint8_t>, WASI::kIOVMax> WasiSiData;
+  StaticVector<Span<const uint8_t>, WASI::kIOVMax> WasiSiData;
 
-  for (__wasi_size_t I = 0; I < WasiSiDataLen; ++I) {
-    __wasi_ciovec_t &SiData = SiDataArray[I];
-
-    /// Capping total size.
+  for (auto &SiData : SiDataArray) {
+    // Capping total size.
     const __wasi_size_t Space =
         std::numeric_limits<__wasi_size_t>::max() - TotalSize;
     const __wasi_size_t BufLen =
         unlikely(SiData.buf_len > Space) ? Space : SiData.buf_len;
     TotalSize += BufLen;
 
-    /// Check for invalid address.
-    auto *const SiDataArr = MemInst->getPointer<uint8_t *>(SiData.buf, BufLen);
-    /// Check for invalid address.
-    if (unlikely(SiDataArr == nullptr)) {
+    // Check for invalid address.
+    const auto SiDataArr = MemInst->getSpan<uint8_t>(SiData.buf, BufLen);
+    if (unlikely(SiDataArr.size() != BufLen)) {
       return __WASI_ERRNO_FAULT;
     }
-    WasiSiData[I] = {SiDataArr, BufLen};
+    WasiSiData.emplace_back_unchecked(SiDataArr);
   }
 
   const __wasi_fd_t WasiFd = Fd;
 
-  if (auto Res = Env.sockSend(WasiFd, {WasiSiData.data(), WasiSiDataLen},
-                              WasiSiFlags, *SoDataLen);
+  if (auto Res = Env.sockSend(WasiFd, WasiSiData, WasiSiFlags, *SoDataLen);
       unlikely(!Res)) {
     return Res.error();
   }
   return __WASI_ERRNO_SUCCESS;
 }
 
-Expect<uint32_t> WasiSockShutdown::body(Runtime::Instance::MemoryInstance *,
+Expect<uint32_t> WasiSockSendToV1::body(const Runtime::CallingFrame &Frame,
+                                        int32_t Fd, uint32_t SiDataPtr,
+                                        uint32_t SiDataLen, uint32_t AddressPtr,
+                                        int32_t Port, uint32_t SiFlags,
+                                        uint32_t /* Out */ SoDataLenPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
+  if (MemInst == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_address_t *InnerAddress =
+      MemInst->getPointer<__wasi_address_t *>(AddressPtr);
+  if (InnerAddress == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  const auto Address =
+      MemInst->getSpan<uint8_t>(InnerAddress->buf, InnerAddress->buf_len);
+  if (Address.size() != InnerAddress->buf_len) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_address_family_t WasiAddressFamily;
+  switch (Address.size()) {
+  case 4:
+    WasiAddressFamily = __WASI_ADDRESS_FAMILY_INET4;
+    break;
+  case 16:
+    WasiAddressFamily = __WASI_ADDRESS_FAMILY_INET6;
+    break;
+  default:
+    return __WASI_ERRNO_INVAL;
+  }
+
+  __wasi_siflags_t WasiSiFlags;
+  if (auto Res = cast<__wasi_siflags_t>(SiFlags); unlikely(!Res)) {
+    return Res.error();
+  } else {
+    WasiSiFlags = *Res;
+  }
+
+  const __wasi_size_t WasiSiDataLen = SiDataLen;
+  if (unlikely(WasiSiDataLen > WASI::kIOVMax)) {
+    return __WASI_ERRNO_INVAL;
+  }
+
+  // Check for invalid address.
+  const auto SiDataArray =
+      MemInst->getSpan<__wasi_ciovec_t>(SiDataPtr, WasiSiDataLen);
+  if (unlikely(SiDataArray.size() != WasiSiDataLen)) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  auto *const SoDataLen = MemInst->getPointer<__wasi_size_t *>(SoDataLenPtr);
+  if (unlikely(SoDataLen == nullptr)) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_size_t TotalSize = 0;
+  StaticVector<Span<const uint8_t>, WASI::kIOVMax> WasiSiData;
+
+  for (auto &SiData : SiDataArray) {
+    // Capping total size.
+    const __wasi_size_t Space =
+        std::numeric_limits<__wasi_size_t>::max() - TotalSize;
+    const __wasi_size_t BufLen =
+        unlikely(SiData.buf_len > Space) ? Space : SiData.buf_len;
+    TotalSize += BufLen;
+
+    // Check for invalid address.
+    const auto SiDataArr = MemInst->getSpan<uint8_t>(SiData.buf, BufLen);
+    if (unlikely(SiDataArr.size() != BufLen)) {
+      return __WASI_ERRNO_FAULT;
+    }
+    WasiSiData.emplace_back_unchecked(SiDataArr);
+  }
+
+  const __wasi_fd_t WasiFd = Fd;
+
+  if (auto Res =
+          Env.sockSendTo(WasiFd, WasiSiData, WasiSiFlags, WasiAddressFamily,
+                         Address, static_cast<uint16_t>(Port), *SoDataLen);
+      unlikely(!Res)) {
+    return Res.error();
+  }
+
+  return __WASI_ERRNO_SUCCESS;
+}
+
+Expect<uint32_t> WasiSockShutdown::body(const Runtime::CallingFrame &,
                                         int32_t Fd, uint32_t SdFlags) {
   __wasi_sdflags_t WasiSdFlags;
   if (auto Res = cast<__wasi_sdflags_t>(SdFlags); unlikely(!Res)) {
@@ -1847,5 +2127,959 @@ Expect<uint32_t> WasiSockShutdown::body(Runtime::Instance::MemoryInstance *,
   return __WASI_ERRNO_SUCCESS;
 }
 
+Expect<uint32_t> WasiSockSetOpt::body(const Runtime::CallingFrame &Frame,
+                                      int32_t Fd, uint32_t SockOptLevel,
+                                      uint32_t SockOptName, uint32_t FlagPtr,
+                                      uint32_t FlagSize) {
+  auto *MemInst = Frame.getMemoryByIndex(0);
+  if (MemInst == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_sock_opt_level_t WasiSockOptLevel;
+  if (auto Res = cast<__wasi_sock_opt_level_t>(SockOptLevel); unlikely(!Res)) {
+    return Res.error();
+  } else {
+    WasiSockOptLevel = *Res;
+  }
+
+  __wasi_sock_opt_so_t WasiSockOptName;
+  if (auto Res = cast<__wasi_sock_opt_so_t>(SockOptName); unlikely(!Res)) {
+    return Res.error();
+  } else {
+    WasiSockOptName = *Res;
+  }
+
+  const auto Flag = MemInst->getSpan<uint8_t>(FlagPtr, FlagSize);
+  if (Flag.size() != FlagSize) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  const __wasi_fd_t WasiFd = Fd;
+
+  if (auto Res =
+          Env.sockSetOpt(WasiFd, WasiSockOptLevel, WasiSockOptName, Flag);
+      unlikely(!Res)) {
+    return Res.error();
+  }
+
+  return __WASI_ERRNO_SUCCESS;
+}
+
+Expect<uint32_t> WasiSockGetAddrinfo::body(
+    const Runtime::CallingFrame &Frame, uint32_t NodePtr, uint32_t NodeLen,
+    uint32_t ServicePtr, uint32_t ServiceLen, uint32_t HintsPtr,
+    uint32_t ResPtr, uint32_t MaxResLength, uint32_t ResLengthPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
+  if (MemInst == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  const auto Node = MemInst->getStringView(NodePtr, NodeLen);
+  if (Node.size() != NodeLen) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  const auto Service = MemInst->getStringView(ServicePtr, ServiceLen);
+  if (Service.size() != ServiceLen) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  auto *Hint = MemInst->getPointer<const __wasi_addrinfo_t *>(HintsPtr);
+  if (Hint == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  auto *const ResBuf = MemInst->getPointer<const uint8_t_ptr *>(ResPtr);
+  if (ResBuf == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  auto *const ResLength = MemInst->getPointer<__wasi_size_t *>(ResLengthPtr);
+  if (ResLength == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  // service and node can not be empty at the same time
+  if (Service.empty() && Node.empty()) {
+    return __WASI_ERRNO_AINONAME;
+  }
+
+  if (MaxResLength < 1) {
+    return __WASI_ERRNO_AIMEMORY;
+  }
+
+  if (Hint->ai_flags &
+      ~(__WASI_AIFLAGS_AI_PASSIVE | __WASI_AIFLAGS_AI_CANONNAME |
+        __WASI_AIFLAGS_AI_NUMERICHOST | __WASI_AIFLAGS_AI_NUMERICSERV |
+        __WASI_AIFLAGS_AI_ADDRCONFIG | __WASI_AIFLAGS_AI_V4MAPPED |
+        __WASI_AIFLAGS_AI_ALL)) {
+    return __WASI_ERRNO_AIBADFLAG;
+  }
+  if (Hint->ai_flags & __WASI_AIFLAGS_AI_CANONNAME && Node.empty()) {
+    return __WASI_ERRNO_AIBADFLAG;
+  }
+  switch (Hint->ai_family) {
+  case __WASI_ADDRESS_FAMILY_UNSPEC:
+  case __WASI_ADDRESS_FAMILY_INET4:
+  case __WASI_ADDRESS_FAMILY_INET6:
+    break;
+  default:
+    return __WASI_ERRNO_AIFAMILY;
+  }
+  switch (Hint->ai_protocol) {
+  case __WASI_PROTOCOL_IPPROTO_IP:
+  case __WASI_PROTOCOL_IPPROTO_TCP:
+  case __WASI_PROTOCOL_IPPROTO_UDP:
+    break;
+  default:
+    return __WASI_ERRNO_NOSYS;
+  }
+  switch (Hint->ai_socktype) {
+  case __WASI_SOCK_TYPE_SOCK_ANY:
+  case __WASI_SOCK_TYPE_SOCK_DGRAM:
+  case __WASI_SOCK_TYPE_SOCK_STREAM:
+    break;
+  default:
+    return __WASI_ERRNO_NOSYS;
+  }
+
+  auto Body = [&]() -> WASI::WasiExpect<void> {
+    auto initWasiAddrinfoArray =
+        [&MemInst](uint8_t_ptr Base, uint32_t Length,
+                   Span<__wasi_addrinfo_t *> WasiAddrinfoArray) noexcept
+        -> WASI::WasiExpect<void> {
+      for (uint32_t Item = 0; Item < Length; Item++) {
+        auto *const TmpAddrinfo =
+            MemInst->getPointer<__wasi_addrinfo_t *>(Base);
+        if (TmpAddrinfo == nullptr) {
+          return WASI::WasiUnexpect(__WASI_ERRNO_FAULT);
+        }
+        WasiAddrinfoArray[Item] = TmpAddrinfo;
+        Base = TmpAddrinfo->ai_next;
+      }
+      return {};
+    };
+
+    auto initAiAddrArray =
+        [&MemInst](Span<__wasi_addrinfo_t *> WasiAddrinfoArray,
+                   Span<__wasi_sockaddr_t *> WasiSockAddrArray) noexcept
+        -> WASI::WasiExpect<void> {
+      for (uint32_t Item = 0; Item < WasiAddrinfoArray.size(); Item++) {
+        auto *const Addr = MemInst->getPointer<__wasi_sockaddr_t *>(
+            WasiAddrinfoArray[Item]->ai_addr);
+        if (Addr == nullptr) {
+          return WASI::WasiUnexpect(__WASI_ERRNO_FAULT);
+        }
+        WasiSockAddrArray[Item] = Addr;
+      }
+      return {};
+    };
+
+    auto initAiAddrSaDataArray =
+        [&MemInst](Span<__wasi_sockaddr_t *> WasiSockAddrArray,
+                   Span<char *> AiSockAddrSaDataArray) noexcept
+        -> WASI::WasiExpect<void> {
+      for (uint32_t Item = 0; Item < WasiSockAddrArray.size(); Item++) {
+        const auto WasiSockAddr =
+            MemInst->getSpan<char>(WasiSockAddrArray[Item]->sa_data,
+                                   WasiSockAddrArray[Item]->sa_data_len);
+        if (WasiSockAddr.size() != WasiSockAddrArray[Item]->sa_data_len) {
+          return WASI::WasiUnexpect(__WASI_ERRNO_FAULT);
+        }
+        AiSockAddrSaDataArray[Item] = WasiSockAddr.data();
+      }
+      return {};
+    };
+
+    auto initAiCanonnameArray =
+        [&MemInst](Span<__wasi_addrinfo_t *> WasiAddrinfoArray,
+                   Span<char *> WasiAddrinfoCanonnameArray) noexcept
+        -> WASI::WasiExpect<void> {
+      for (uint32_t Item = 0; Item < WasiAddrinfoArray.size(); Item++) {
+        const auto CanonName =
+            MemInst->getSpan<char>(WasiAddrinfoArray[Item]->ai_canonname,
+                                   WasiAddrinfoArray[Item]->ai_canonname_len);
+        if (CanonName.size() != WasiAddrinfoArray[Item]->ai_canonname_len) {
+          return WASI::WasiUnexpect(__WASI_ERRNO_FAULT);
+        }
+        WasiAddrinfoCanonnameArray[Item] = CanonName.data();
+      }
+      return {};
+    };
+
+    std::vector<__wasi_addrinfo_t *> WasiAddrinfoArray(MaxResLength, nullptr);
+    std::vector<__wasi_sockaddr_t *> WasiSockAddrArray(MaxResLength, nullptr);
+    std::vector<char *> AiAddrSaDataArray(MaxResLength, nullptr);
+    std::vector<char *> AiCanonnameArray(MaxResLength, nullptr);
+
+    EXPECTED_TRY(
+        initWasiAddrinfoArray(*ResBuf, MaxResLength, WasiAddrinfoArray));
+    EXPECTED_TRY(initAiAddrArray(WasiAddrinfoArray, WasiSockAddrArray));
+    EXPECTED_TRY(initAiAddrSaDataArray(WasiSockAddrArray, AiAddrSaDataArray));
+    EXPECTED_TRY(initAiCanonnameArray(WasiAddrinfoArray, AiCanonnameArray));
+
+    EXPECTED_TRY(Env.getAddrInfo(
+        Node, Service, *Hint, MaxResLength, WasiAddrinfoArray,
+        WasiSockAddrArray, AiAddrSaDataArray, AiCanonnameArray, *ResLength));
+    return {};
+  };
+  if (auto Res = Body(); unlikely(!Res)) {
+    return Res.error();
+  }
+
+  return __WASI_ERRNO_SUCCESS;
+}
+
+Expect<uint32_t>
+WasiSockGetLocalAddrV1::body(const Runtime::CallingFrame &Frame, int32_t Fd,
+                             uint32_t AddressPtr, uint32_t AddressTypePtr,
+                             uint32_t PortPtr) {
+  auto *MemInst = Frame.getMemoryByIndex(0);
+  if (MemInst == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+  __wasi_address_t *InnerAddress =
+      MemInst->getPointer<__wasi_address_t *>(AddressPtr);
+  if (InnerAddress == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  const auto Address =
+      MemInst->getSpan<uint8_t>(InnerAddress->buf, InnerAddress->buf_len);
+  if (Address.size() != InnerAddress->buf_len) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  switch (Address.size()) {
+  case 4:
+    break;
+  case 16:
+    break;
+  default:
+    return __WASI_ERRNO_INVAL;
+  }
+
+  uint32_t *const RoAddressType =
+      MemInst->getPointer<uint32_t *>(AddressTypePtr);
+  if (RoAddressType == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+  __wasi_address_family_t AddressType;
+
+  uint32_t *const RoPort = MemInst->getPointer<uint32_t *>(PortPtr);
+  if (RoPort == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  uint16_t Port;
+  const __wasi_fd_t WasiFd = Fd;
+
+  if (auto Res = Env.sockGetLocalAddr(WasiFd, &AddressType, Address, &Port);
+      unlikely(!Res)) {
+    return Res.error();
+  }
+  *RoPort = Port;
+  // XXX: This is a workaround
+  // The correct one should be `*RoAddressType = AddressType;`
+  // However, due to this bugfix will break the existing applications.
+  // So we changed back to the old way.
+  switch (AddressType) {
+  case __WASI_ADDRESS_FAMILY_INET4:
+    *RoAddressType = 4;
+    break;
+  case __WASI_ADDRESS_FAMILY_INET6:
+    *RoAddressType = 6;
+    break;
+  default:
+    assumingUnreachable();
+  }
+  return __WASI_ERRNO_SUCCESS;
+}
+
+Expect<uint32_t> WasiSockGetPeerAddrV1::body(const Runtime::CallingFrame &Frame,
+                                             int32_t Fd, uint32_t AddressPtr,
+                                             uint32_t AddressTypePtr,
+                                             uint32_t PortPtr) {
+  auto *MemInst = Frame.getMemoryByIndex(0);
+  if (MemInst == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+  __wasi_address_t *InnerAddress =
+      MemInst->getPointer<__wasi_address_t *>(AddressPtr);
+  if (InnerAddress == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  const auto Address =
+      MemInst->getSpan<uint8_t>(InnerAddress->buf, InnerAddress->buf_len);
+  if (Address.size() != InnerAddress->buf_len) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  switch (Address.size()) {
+  case 4:
+    break;
+  case 16:
+    break;
+  default:
+    return __WASI_ERRNO_INVAL;
+  }
+
+  uint32_t *const RoAddressType =
+      MemInst->getPointer<uint32_t *>(AddressTypePtr);
+  if (RoAddressType == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+  __wasi_address_family_t AddressType;
+
+  uint32_t *const RoPort = MemInst->getPointer<uint32_t *>(PortPtr);
+  if (RoPort == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+  uint16_t Port;
+
+  const __wasi_fd_t WasiFd = Fd;
+
+  if (auto Res = Env.sockGetPeerAddr(WasiFd, &AddressType, Address, &Port);
+      unlikely(!Res)) {
+    return Res.error();
+  }
+  *RoPort = Port;
+  // XXX: This is a workaround
+  // The correct one should be `*RoAddressType = AddressType;`
+  // However, due to this bugfix will break the existing applications.
+  // So we changed back to the old way.
+  switch (AddressType) {
+  case __WASI_ADDRESS_FAMILY_INET4:
+    *RoAddressType = 4;
+    break;
+  case __WASI_ADDRESS_FAMILY_INET6:
+    *RoAddressType = 6;
+    break;
+  default:
+    assumingUnreachable();
+  }
+  return __WASI_ERRNO_SUCCESS;
+}
+
+Expect<uint32_t> WasiSockOpenV2::body(const Runtime::CallingFrame &Frame,
+                                      uint32_t AddressFamily, uint32_t SockType,
+                                      uint32_t /* Out */ RoFdPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
+  if (MemInst == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_fd_t *const RoFd = MemInst->getPointer<__wasi_fd_t *>(RoFdPtr);
+  if (RoFd == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_address_family_t WasiAddressFamily;
+  if (auto Res = cast<__wasi_address_family_t>(AddressFamily); unlikely(!Res)) {
+    return Res.error();
+  } else {
+    WasiAddressFamily = *Res;
+  }
+
+  if (!AllowAFUNIX(Frame, WasiAddressFamily)) {
+    return __WASI_ERRNO_NOSYS;
+  }
+
+  __wasi_sock_type_t WasiSockType;
+  if (auto Res = cast<__wasi_sock_type_t>(SockType); unlikely(!Res)) {
+    return Res.error();
+  } else {
+    WasiSockType = *Res;
+  }
+
+  if (auto Res = Env.sockOpen(WasiAddressFamily, WasiSockType);
+      unlikely(!Res)) {
+    return Res.error();
+  } else {
+    *RoFd = *Res;
+  }
+
+  return __WASI_ERRNO_SUCCESS;
+}
+
+Expect<uint32_t> WasiSockBindV2::body(const Runtime::CallingFrame &Frame,
+                                      int32_t Fd, uint32_t AddressPtr,
+                                      uint32_t Port) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
+  if (MemInst == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+  auto *const InnerAddress =
+      MemInst->getPointer<__wasi_address_t *>(AddressPtr);
+  if (InnerAddress == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  auto Address =
+      MemInst->getSpan<const uint8_t>(InnerAddress->buf, InnerAddress->buf_len);
+  if (Address.size() != InnerAddress->buf_len) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_address_family_t WasiAddressFamily;
+  switch (Address.size()) {
+  case 4:
+    WasiAddressFamily = __WASI_ADDRESS_FAMILY_INET4;
+    break;
+  case 16:
+    WasiAddressFamily = __WASI_ADDRESS_FAMILY_INET6;
+    break;
+  case 128: {
+    auto &Storage =
+        *reinterpret_cast<const WASI::WasiAddrStorage *>(Address.data());
+    WasiAddressFamily = Storage.getAddressFamily();
+    Address = Storage.getAddress();
+    break;
+  }
+  default:
+    return __WASI_ERRNO_INVAL;
+  }
+
+  const __wasi_fd_t WasiFd = Fd;
+
+  if (auto Res = Env.sockBind(WasiFd, WasiAddressFamily, Address,
+                              static_cast<uint16_t>(Port));
+      unlikely(!Res)) {
+    return Res.error();
+  }
+  return __WASI_ERRNO_SUCCESS;
+}
+
+Expect<uint32_t> WasiSockListenV2::body(const Runtime::CallingFrame &,
+                                        int32_t Fd, int32_t Backlog) {
+  const __wasi_fd_t WasiFd = Fd;
+  if (auto Res = Env.sockListen(WasiFd, Backlog); unlikely(!Res)) {
+    return Res.error();
+  }
+  return __WASI_ERRNO_SUCCESS;
+}
+
+Expect<uint32_t> WasiSockConnectV2::body(const Runtime::CallingFrame &Frame,
+                                         int32_t Fd, uint32_t AddressPtr,
+                                         uint32_t Port) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
+  if (MemInst == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+  __wasi_address_t *InnerAddress =
+      MemInst->getPointer<__wasi_address_t *>(AddressPtr);
+  if (InnerAddress == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  auto Address =
+      MemInst->getSpan<const uint8_t>(InnerAddress->buf, InnerAddress->buf_len);
+  if (Address.size() != InnerAddress->buf_len) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_address_family_t WasiAddressFamily;
+  switch (Address.size()) {
+  case 4:
+    WasiAddressFamily = __WASI_ADDRESS_FAMILY_INET4;
+    break;
+  case 16:
+    WasiAddressFamily = __WASI_ADDRESS_FAMILY_INET6;
+    break;
+  case 128: {
+    auto &Storage =
+        *reinterpret_cast<const WASI::WasiAddrStorage *>(Address.data());
+    WasiAddressFamily = Storage.getAddressFamily();
+    Address = Storage.getAddress();
+    break;
+  }
+  default:
+    return __WASI_ERRNO_INVAL;
+  }
+
+  const __wasi_fd_t WasiFd = Fd;
+  if (auto Res = Env.sockConnect(WasiFd, WasiAddressFamily, Address,
+                                 static_cast<uint16_t>(Port));
+      unlikely(!Res)) {
+    return Res.error();
+  }
+
+  return __WASI_ERRNO_SUCCESS;
+}
+
+Expect<uint32_t> WasiSockRecvV2::body(const Runtime::CallingFrame &Frame,
+                                      int32_t Fd, uint32_t RiDataPtr,
+                                      uint32_t RiDataLen, uint32_t RiFlags,
+                                      uint32_t /* Out */ RoDataLenPtr,
+                                      uint32_t /* Out */ RoFlagsPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
+  if (MemInst == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_riflags_t WasiRiFlags;
+  if (auto Res = cast<__wasi_riflags_t>(RiFlags); unlikely(!Res)) {
+    return Res.error();
+  } else {
+    WasiRiFlags = *Res;
+  }
+
+  const __wasi_size_t WasiRiDataLen = RiDataLen;
+  if (unlikely(WasiRiDataLen > WASI::kIOVMax)) {
+    return __WASI_ERRNO_INVAL;
+  }
+
+  // Check for invalid address.
+  const auto RiDataArray =
+      MemInst->getSpan<__wasi_iovec_t>(RiDataPtr, WasiRiDataLen);
+  if (unlikely(RiDataArray.size() != WasiRiDataLen)) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  auto *const RoDataLen = MemInst->getPointer<__wasi_size_t *>(RoDataLenPtr);
+  if (unlikely(RoDataLen == nullptr)) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  auto *const RoFlags = MemInst->getPointer<__wasi_roflags_t *>(RoFlagsPtr);
+  if (unlikely(RoFlags == nullptr)) {
+    return __WASI_ERRNO_FAULT;
+  }
+  __wasi_size_t TotalSize = 0;
+  StaticVector<Span<uint8_t>, WASI::kIOVMax> WasiRiData;
+
+  for (auto &RiData : RiDataArray) {
+    // Capping total size.
+    const __wasi_size_t Space =
+        std::numeric_limits<__wasi_size_t>::max() - TotalSize;
+    const __wasi_size_t BufLen =
+        unlikely(RiData.buf_len > Space) ? Space : RiData.buf_len;
+    TotalSize += BufLen;
+
+    // Check for invalid address.
+    const auto RiDataArr = MemInst->getSpan<uint8_t>(RiData.buf, BufLen);
+    if (unlikely(RiDataArr.size() != BufLen)) {
+      return __WASI_ERRNO_FAULT;
+    }
+    WasiRiData.emplace_back_unchecked(RiDataArr);
+  }
+
+  const __wasi_fd_t WasiFd = Fd;
+
+  if (auto Res =
+          Env.sockRecv(WasiFd, WasiRiData, WasiRiFlags, *RoDataLen, *RoFlags);
+      unlikely(!Res)) {
+    return Res.error();
+  }
+
+  return __WASI_ERRNO_SUCCESS;
+}
+
+Expect<uint32_t> WasiSockRecvFromV2::body(const Runtime::CallingFrame &Frame,
+                                          int32_t Fd, uint32_t RiDataPtr,
+                                          uint32_t RiDataLen,
+                                          uint32_t AddressPtr, uint32_t RiFlags,
+                                          uint32_t /* Out */ PortPtr,
+                                          uint32_t /* Out */ RoDataLenPtr,
+                                          uint32_t /* Out */ RoFlagsPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
+  if (MemInst == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_address_t *InnerAddress =
+      MemInst->getPointer<__wasi_address_t *>(AddressPtr);
+  if (InnerAddress == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  auto Address =
+      MemInst->getSpan<uint8_t>(InnerAddress->buf, InnerAddress->buf_len);
+  if (Address.size() != InnerAddress->buf_len) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_address_family_t WasiAddressFamily;
+  WASI::WasiAddrStorage *Storage = nullptr;
+  switch (Address.size()) {
+  case 4:
+  case 16:
+    break;
+  case 128:
+    Storage = reinterpret_cast<WASI::WasiAddrStorage *>(Address.data());
+    Address = Storage->getAddress();
+    break;
+  default:
+    return __WASI_ERRNO_INVAL;
+  }
+
+  __wasi_riflags_t WasiRiFlags;
+  if (auto Res = cast<__wasi_riflags_t>(RiFlags); unlikely(!Res)) {
+    return Res.error();
+  } else {
+    WasiRiFlags = *Res;
+  }
+
+  const __wasi_size_t WasiRiDataLen = RiDataLen;
+  if (unlikely(WasiRiDataLen > WASI::kIOVMax)) {
+    return __WASI_ERRNO_INVAL;
+  }
+
+  // Check for invalid address.
+  uint16_t *const RoPort = MemInst->getPointer<uint16_t *>(PortPtr);
+  if (RoPort == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  const auto RiDataArray =
+      MemInst->getSpan<__wasi_iovec_t>(RiDataPtr, WasiRiDataLen);
+  if (unlikely(RiDataArray.size() != WasiRiDataLen)) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  auto *const RoDataLen = MemInst->getPointer<__wasi_size_t *>(RoDataLenPtr);
+  if (unlikely(RoDataLen == nullptr)) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  auto *const RoFlags = MemInst->getPointer<__wasi_roflags_t *>(RoFlagsPtr);
+  if (unlikely(RoFlags == nullptr)) {
+    return __WASI_ERRNO_FAULT;
+  }
+  __wasi_size_t TotalSize = 0;
+  StaticVector<Span<uint8_t>, WASI::kIOVMax> WasiRiData;
+
+  for (auto &RiData : RiDataArray) {
+    // Capping total size.
+    const __wasi_size_t Space =
+        std::numeric_limits<__wasi_size_t>::max() - TotalSize;
+    const __wasi_size_t BufLen =
+        unlikely(RiData.buf_len > Space) ? Space : RiData.buf_len;
+    TotalSize += BufLen;
+
+    // Check for invalid address.
+    const auto RiDataArr = MemInst->getSpan<uint8_t>(RiData.buf, BufLen);
+    if (unlikely(RiDataArr.size() != BufLen)) {
+      return __WASI_ERRNO_FAULT;
+    }
+    WasiRiData.emplace_back_unchecked(RiDataArr);
+  }
+
+  const __wasi_fd_t WasiFd = Fd;
+
+  if (auto Res =
+          Env.sockRecvFrom(WasiFd, WasiRiData, WasiRiFlags, &WasiAddressFamily,
+                           Address, RoPort, *RoDataLen, *RoFlags);
+      unlikely(!Res)) {
+    return Res.error();
+  }
+  if (Storage) {
+    Storage->setAddressFamily(WasiAddressFamily);
+  }
+  return __WASI_ERRNO_SUCCESS;
+}
+
+Expect<uint32_t> WasiSockSendV2::body(const Runtime::CallingFrame &Frame,
+                                      int32_t Fd, uint32_t SiDataPtr,
+                                      uint32_t SiDataLen, uint32_t SiFlags,
+                                      uint32_t /* Out */ SoDataLenPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
+  if (MemInst == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_siflags_t WasiSiFlags;
+  if (auto Res = cast<__wasi_siflags_t>(SiFlags); unlikely(!Res)) {
+    return Res.error();
+  } else {
+    WasiSiFlags = *Res;
+  }
+
+  const __wasi_size_t WasiSiDataLen = SiDataLen;
+  if (unlikely(WasiSiDataLen > WASI::kIOVMax)) {
+    return __WASI_ERRNO_INVAL;
+  }
+
+  // Check for invalid address.
+  const auto SiDataArray =
+      MemInst->getSpan<__wasi_ciovec_t>(SiDataPtr, WasiSiDataLen);
+  if (unlikely(SiDataArray.size() != WasiSiDataLen)) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  auto *const SoDataLen = MemInst->getPointer<__wasi_size_t *>(SoDataLenPtr);
+  if (unlikely(SoDataLen == nullptr)) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_size_t TotalSize = 0;
+  StaticVector<Span<const uint8_t>, WASI::kIOVMax> WasiSiData;
+
+  for (auto &SiData : SiDataArray) {
+    // Capping total size.
+    const __wasi_size_t Space =
+        std::numeric_limits<__wasi_size_t>::max() - TotalSize;
+    const __wasi_size_t BufLen =
+        unlikely(SiData.buf_len > Space) ? Space : SiData.buf_len;
+    TotalSize += BufLen;
+
+    // Check for invalid address.
+    const auto SiDataArr = MemInst->getSpan<uint8_t>(SiData.buf, BufLen);
+    if (unlikely(SiDataArr.size() != BufLen)) {
+      return __WASI_ERRNO_FAULT;
+    }
+    WasiSiData.emplace_back_unchecked(SiDataArr);
+  }
+
+  const __wasi_fd_t WasiFd = Fd;
+
+  if (auto Res = Env.sockSend(WasiFd, WasiSiData, WasiSiFlags, *SoDataLen);
+      unlikely(!Res)) {
+    return Res.error();
+  }
+  return __WASI_ERRNO_SUCCESS;
+}
+
+Expect<uint32_t> WasiSockSendToV2::body(const Runtime::CallingFrame &Frame,
+                                        int32_t Fd, uint32_t SiDataPtr,
+                                        uint32_t SiDataLen, uint32_t AddressPtr,
+                                        int32_t Port, uint32_t SiFlags,
+                                        uint32_t /* Out */ SoDataLenPtr) {
+  // Check memory instance from module.
+  auto *MemInst = Frame.getMemoryByIndex(0);
+  if (MemInst == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_address_t *InnerAddress =
+      MemInst->getPointer<__wasi_address_t *>(AddressPtr);
+  if (InnerAddress == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  auto Address =
+      MemInst->getSpan<const uint8_t>(InnerAddress->buf, InnerAddress->buf_len);
+  if (Address.size() != InnerAddress->buf_len) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_address_family_t WasiAddressFamily;
+  switch (Address.size()) {
+  case 4:
+    WasiAddressFamily = __WASI_ADDRESS_FAMILY_INET4;
+    break;
+  case 16:
+    WasiAddressFamily = __WASI_ADDRESS_FAMILY_INET6;
+    break;
+  case 128: {
+    auto &Storage =
+        *reinterpret_cast<const WASI::WasiAddrStorage *>(Address.data());
+    WasiAddressFamily = Storage.getAddressFamily();
+    Address = Storage.getAddress();
+    break;
+  }
+  default:
+    return __WASI_ERRNO_INVAL;
+  }
+
+  __wasi_siflags_t WasiSiFlags;
+  if (auto Res = cast<__wasi_siflags_t>(SiFlags); unlikely(!Res)) {
+    return Res.error();
+  } else {
+    WasiSiFlags = *Res;
+  }
+
+  const __wasi_size_t WasiSiDataLen = SiDataLen;
+  if (unlikely(WasiSiDataLen > WASI::kIOVMax)) {
+    return __WASI_ERRNO_INVAL;
+  }
+
+  // Check for invalid address.
+  const auto SiDataArray =
+      MemInst->getSpan<__wasi_ciovec_t>(SiDataPtr, WasiSiDataLen);
+  if (unlikely(SiDataArray.size() != WasiSiDataLen)) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  auto *const SoDataLen = MemInst->getPointer<__wasi_size_t *>(SoDataLenPtr);
+  if (unlikely(SoDataLen == nullptr)) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_size_t TotalSize = 0;
+  StaticVector<Span<const uint8_t>, WASI::kIOVMax> WasiSiData;
+
+  for (auto &SiData : SiDataArray) {
+    // Capping total size.
+    const __wasi_size_t Space =
+        std::numeric_limits<__wasi_size_t>::max() - TotalSize;
+    const __wasi_size_t BufLen =
+        unlikely(SiData.buf_len > Space) ? Space : SiData.buf_len;
+    TotalSize += BufLen;
+
+    // Check for invalid address.
+    const auto SiDataArr = MemInst->getSpan<uint8_t>(SiData.buf, BufLen);
+    if (unlikely(SiDataArr.size() != BufLen)) {
+      return __WASI_ERRNO_FAULT;
+    }
+    WasiSiData.emplace_back_unchecked(SiDataArr);
+  }
+
+  const __wasi_fd_t WasiFd = Fd;
+
+  if (auto Res =
+          Env.sockSendTo(WasiFd, WasiSiData, WasiSiFlags, WasiAddressFamily,
+                         Address, static_cast<uint16_t>(Port), *SoDataLen);
+      unlikely(!Res)) {
+    return Res.error();
+  }
+
+  return __WASI_ERRNO_SUCCESS;
+}
+
+Expect<uint32_t> WasiSockGetOpt::body(const Runtime::CallingFrame &Frame,
+                                      int32_t Fd, uint32_t SockOptLevel,
+                                      uint32_t SockOptName, uint32_t FlagPtr,
+                                      uint32_t FlagSizePtr) {
+  auto *MemInst = Frame.getMemoryByIndex(0);
+  if (MemInst == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  __wasi_sock_opt_level_t WasiSockOptLevel;
+  if (auto Res = cast<__wasi_sock_opt_level_t>(SockOptLevel); unlikely(!Res)) {
+    return Res.error();
+  } else {
+    WasiSockOptLevel = *Res;
+  }
+
+  __wasi_sock_opt_so_t WasiSockOptName;
+  if (auto Res = cast<__wasi_sock_opt_so_t>(SockOptName); unlikely(!Res)) {
+    return Res.error();
+  } else {
+    WasiSockOptName = *Res;
+  }
+
+  auto *const SysFlagSizePtr = MemInst->getPointer<uint32_t *>(FlagSizePtr);
+  if (SysFlagSizePtr == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  auto Flag = MemInst->getSpan<uint8_t>(FlagPtr, *SysFlagSizePtr);
+  if (Flag.size() != *SysFlagSizePtr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  const __wasi_fd_t WasiFd = Fd;
+
+  if (auto Res =
+          Env.sockGetOpt(WasiFd, WasiSockOptLevel, WasiSockOptName, Flag);
+      unlikely(!Res)) {
+    return Res.error();
+  }
+
+  *SysFlagSizePtr = static_cast<uint32_t>(Flag.size());
+  return __WASI_ERRNO_SUCCESS;
+}
+
+Expect<uint32_t>
+WasiSockGetLocalAddrV2::body(const Runtime::CallingFrame &Frame, int32_t Fd,
+                             uint32_t AddressPtr, uint32_t PortPtr) {
+  auto *MemInst = Frame.getMemoryByIndex(0);
+  if (MemInst == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+  __wasi_address_t *InnerAddress =
+      MemInst->getPointer<__wasi_address_t *>(AddressPtr);
+  if (InnerAddress == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  auto Address =
+      MemInst->getSpan<uint8_t>(InnerAddress->buf, InnerAddress->buf_len);
+  if (Address.size() != InnerAddress->buf_len) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  uint32_t *const RoPort = MemInst->getPointer<uint32_t *>(PortPtr);
+  if (RoPort == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  if (Address.size() != 128) {
+    return __WASI_ERRNO_INVAL;
+  }
+
+  const __wasi_fd_t WasiFd = Fd;
+  WASI::WasiAddrStorage &Storage =
+      *reinterpret_cast<WASI::WasiAddrStorage *>(Address.data());
+  Address = Storage.getAddress();
+  __wasi_address_family_t WasiAddressFamily;
+  uint16_t Port;
+
+  if (auto Res =
+          Env.sockGetLocalAddr(WasiFd, &WasiAddressFamily, Address, &Port);
+      unlikely(!Res)) {
+    return Res.error();
+  }
+
+  Storage.setAddressFamily(WasiAddressFamily);
+  *RoPort = Port;
+  return __WASI_ERRNO_SUCCESS;
+}
+
+Expect<uint32_t> WasiSockGetPeerAddrV2::body(const Runtime::CallingFrame &Frame,
+                                             int32_t Fd, uint32_t AddressPtr,
+                                             uint32_t PortPtr) {
+  auto *MemInst = Frame.getMemoryByIndex(0);
+  if (MemInst == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+  __wasi_address_t *InnerAddress =
+      MemInst->getPointer<__wasi_address_t *>(AddressPtr);
+  if (InnerAddress == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  auto Address =
+      MemInst->getSpan<uint8_t>(InnerAddress->buf, InnerAddress->buf_len);
+  if (Address.size() != InnerAddress->buf_len) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  uint32_t *const RoPort = MemInst->getPointer<uint32_t *>(PortPtr);
+  if (RoPort == nullptr) {
+    return __WASI_ERRNO_FAULT;
+  }
+
+  if (Address.size() != 128) {
+    return __WASI_ERRNO_INVAL;
+  }
+
+  const __wasi_fd_t WasiFd = Fd;
+  WASI::WasiAddrStorage &Storage =
+      *reinterpret_cast<WASI::WasiAddrStorage *>(Address.data());
+  Address = Storage.getAddress();
+  __wasi_address_family_t WasiAddressFamily;
+  uint16_t Port;
+
+  if (auto Res =
+          Env.sockGetPeerAddr(WasiFd, &WasiAddressFamily, Address, &Port);
+      unlikely(!Res)) {
+    return Res.error();
+  }
+  Storage.setAddressFamily(WasiAddressFamily);
+  *RoPort = Port;
+  return __WASI_ERRNO_SUCCESS;
+}
 } // namespace Host
 } // namespace WasmEdge

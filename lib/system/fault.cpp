@@ -1,95 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2024 Second State INC
 
 #include "system/fault.h"
 
 #include "common/config.h"
 #include "common/defines.h"
-#include "common/log.h"
+#include "common/spdlog.h"
+#include "system/stacktrace.h"
 
 #include <atomic>
-#include <cassert>
 #include <csetjmp>
 #include <csignal>
+#include <cstdint>
+#include <utility>
 
 #if WASMEDGE_OS_WINDOWS
-
-#include <boost/winapi/basic_types.hpp>
-
-#if !defined(BOOST_USE_WINDOWS_H)
-extern "C" {
-
-struct _CONTEXT;
-struct _EXCEPTION_RECORD;
-struct _EXCEPTION_POINTERS;
-
-BOOST_WINAPI_IMPORT boost::winapi::PVOID_ BOOST_WINAPI_WINAPI_CC
-AddVectoredExceptionHandler(
-    boost::winapi::ULONG_ First,
-    boost::winapi::LONG_(BOOST_WINAPI_WINAPI_CC *Handler)(
-        struct _EXCEPTION_POINTERS *ExceptionInfo));
-
-BOOST_WINAPI_IMPORT boost::winapi::ULONG_ BOOST_WINAPI_WINAPI_CC
-RemoveVectoredExceptionHandler(boost::winapi::PVOID_ Handle);
-}
-#else
-#include <windows.h>
-
-#include <errhandlingapi.h>
-#include <winnt.h>
-#endif
-
-namespace boost::winapi {
-
-#if defined(BOOST_USE_WINDOWS_H)
-BOOST_CONSTEXPR_OR_CONST DWORD_ EXCEPTION_MAXIMUM_PARAMETERS_ =
-    EXCEPTION_MAXIMUM_PARAMETERS;
-BOOST_CONSTEXPR_OR_CONST DWORD_ EXCEPTION_ACCESS_VIOLATION_ =
-    EXCEPTION_ACCESS_VIOLATION;
-BOOST_CONSTEXPR_OR_CONST DWORD_ EXCEPTION_INT_DIVIDE_BY_ZERO_ =
-    EXCEPTION_INT_DIVIDE_BY_ZERO;
-BOOST_CONSTEXPR_OR_CONST DWORD_ EXCEPTION_INT_OVERFLOW_ =
-    EXCEPTION_INT_OVERFLOW;
-BOOST_CONSTEXPR_OR_CONST LONG_ EXCEPTION_CONTINUE_EXECUTION_ =
-    EXCEPTION_CONTINUE_EXECUTION;
-#else
-BOOST_CONSTEXPR_OR_CONST DWORD_ EXCEPTION_MAXIMUM_PARAMETERS_ = 15;
-BOOST_CONSTEXPR_OR_CONST DWORD_ EXCEPTION_ACCESS_VIOLATION_ = 0xC0000005L;
-BOOST_CONSTEXPR_OR_CONST DWORD_ EXCEPTION_INT_DIVIDE_BY_ZERO_ = 0xC0000094L;
-BOOST_CONSTEXPR_OR_CONST DWORD_ EXCEPTION_INT_OVERFLOW_ = 0xC0000095L;
-BOOST_CONSTEXPR_OR_CONST LONG_ EXCEPTION_CONTINUE_EXECUTION_ =
-    static_cast<LONG_>(0xffffffff);
-#endif
-
-typedef struct BOOST_MAY_ALIAS _CONTEXT CONTEXT_, *PCONTEXT_;
-
-typedef struct BOOST_MAY_ALIAS _EXCEPTION_RECORD {
-  DWORD_ ExceptionCode;
-  DWORD_ ExceptionFlags;
-  struct _EXCEPTION_RECORD *ExceptionRecord;
-  PVOID_ ExceptionAddress;
-  DWORD_ NumberParameters;
-  PULONG_ ExceptionInformation[EXCEPTION_MAXIMUM_PARAMETERS_];
-} EXCEPTION_RECORD_, *PEXCEPTION_RECORD_;
-
-typedef struct BOOST_MAY_ALIAS _EXCEPTION_POINTERS {
-  PEXCEPTION_RECORD_ ExceptionRecord;
-  PCONTEXT_ ContextRecord;
-} EXCEPTION_POINTERS_, *PEXCEPTION_POINTERS_;
-
-BOOST_FORCEINLINE PVOID_ AddVectoredExceptionHandler(
-    ULONG_ First,
-    LONG_(BOOST_WINAPI_WINAPI_CC *Handler)(PEXCEPTION_POINTERS_)) {
-  return ::AddVectoredExceptionHandler(
-      First, reinterpret_cast<LONG_(BOOST_WINAPI_WINAPI_CC *)(
-                 ::_EXCEPTION_POINTERS *)>(Handler));
-}
-
-BOOST_FORCEINLINE ULONG_ RemoveVectoredExceptionHandler(PVOID_ Handle) {
-  return ::RemoveVectoredExceptionHandler(Handle);
-}
-
-} // namespace boost::winapi
-
+#include "system/winapi.h"
 #endif
 
 namespace WasmEdge {
@@ -100,8 +26,7 @@ std::atomic_uint handlerCount = 0;
 thread_local Fault *localHandler = nullptr;
 
 #if defined(SA_SIGINFO)
-[[noreturn]] void signalHandler(int Signal, siginfo_t *Siginfo [[maybe_unused]],
-                                void *) noexcept {
+void signalHandler(int Signal, siginfo_t *Siginfo, void *) {
   {
     // Unblock current signal
     sigset_t Set;
@@ -112,12 +37,12 @@ thread_local Fault *localHandler = nullptr;
   switch (Signal) {
   case SIGBUS:
   case SIGSEGV:
-    Fault::emitFault(ErrCode::MemoryOutOfBounds);
+    Fault::emitFault(ErrCode::Value::MemoryOutOfBounds);
   case SIGFPE:
-    assert(Siginfo->si_code == FPE_INTDIV);
-    Fault::emitFault(ErrCode::DivideByZero);
+    assuming(Siginfo->si_code == FPE_INTDIV);
+    Fault::emitFault(ErrCode::Value::DivideByZero);
   default:
-    __builtin_unreachable();
+    assumingUnreachable();
   }
 }
 
@@ -138,18 +63,16 @@ void disableHandler() noexcept {
 
 #elif WASMEDGE_OS_WINDOWS
 
-namespace winapi = boost::winapi;
-
-winapi::LONG_
-vectoredExceptionHandler(winapi::EXCEPTION_POINTERS_ *ExceptionInfo) {
+winapi::LONG_ WASMEDGE_WINAPI_WINAPI_CC
+vectoredExceptionHandler(winapi::PEXCEPTION_POINTERS_ ExceptionInfo) {
   const winapi::DWORD_ Code = ExceptionInfo->ExceptionRecord->ExceptionCode;
   switch (Code) {
   case winapi::EXCEPTION_INT_DIVIDE_BY_ZERO_:
-    Fault::emitFault(ErrCode::DivideByZero);
+    Fault::emitFault(ErrCode::Value::DivideByZero);
   case winapi::EXCEPTION_INT_OVERFLOW_:
-    Fault::emitFault(ErrCode::IntegerOverflow);
+    Fault::emitFault(ErrCode::Value::IntegerOverflow);
   case winapi::EXCEPTION_ACCESS_VIOLATION_:
-    Fault::emitFault(ErrCode::MemoryOutOfBounds);
+    Fault::emitFault(ErrCode::Value::MemoryOutOfBounds);
   }
   return winapi::EXCEPTION_CONTINUE_EXECUTION_;
 }
@@ -191,19 +114,11 @@ Fault::~Fault() noexcept {
   localHandler = std::exchange(Prev, nullptr);
 }
 
-[[noreturn]] inline void Fault::emitFault(ErrCode Error) {
-  assert(localHandler != nullptr);
-  longjmp(localHandler->Buffer, uint8_t(Error));
-}
-
-FaultBlocker::FaultBlocker() noexcept {
-  decreaseHandler();
-  Prev = std::exchange(localHandler, nullptr);
-}
-
-FaultBlocker::~FaultBlocker() noexcept {
-  localHandler = std::exchange(Prev, nullptr);
-  increaseHandler();
+[[noreturn]] void Fault::emitFault(ErrCode Error) {
+  assuming(localHandler != nullptr);
+  auto Buffer = stackTrace(localHandler->StackTraceBuffer);
+  localHandler->StackTraceSize = Buffer.size();
+  longjmp(localHandler->Buffer, static_cast<int>(Error.operator uint32_t()));
 }
 
 } // namespace WasmEdge

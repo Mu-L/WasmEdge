@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
-#include "gtest/gtest.h"
 #include <experimental/expected.hpp>
+#include <gtest/gtest.h>
+#include <type_traits>
+#include <utility>
 
 TEST(NoExceptTest, NoThrow) {
   using T = cxx20::expected<int, int>;
@@ -29,7 +31,14 @@ TEST(NoExceptTest, ThrowAll) {
     [[noreturn]] [[maybe_unused]] throw_all(throw_all &&) noexcept(false) {
       throw 0;
     }
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable:4722)
+#endif
     [[noreturn]] ~throw_all() noexcept(false) { throw 0; }
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
     [[noreturn]] throw_all &operator=(const throw_all &) noexcept(false) {
       throw 0;
     }

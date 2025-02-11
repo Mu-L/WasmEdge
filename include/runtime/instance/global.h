@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2024 Second State INC
+
 //===-- wasmedge/runtime/instance/global.h - Global Instance definition ---===//
 //
 // Part of the WasmEdge Project.
@@ -21,24 +23,28 @@ class GlobalInstance {
 public:
   GlobalInstance() = delete;
   GlobalInstance(const AST::GlobalType &GType,
-                 const ValVariant Val = uint32_t(0)) noexcept
-      : GlobType(GType), Value(Val) {}
-  virtual ~GlobalInstance() = default;
+                 ValVariant Val = uint128_t(0U)) noexcept
+      : GlobType(GType), Value(Val) {
+    assuming(GType.getValType().isNumType() ||
+             GType.getValType().isNullableRefType() ||
+             !Val.get<RefVariant>().isNull());
+  }
 
   /// Getter of global type.
-  const AST::GlobalType &getGlobalType() const { return GlobType; }
+  const AST::GlobalType &getGlobalType() const noexcept { return GlobType; }
 
   /// Getter of value.
-  const ValVariant &getValue() const { return Value; }
+  const ValVariant &getValue() const noexcept { return Value; }
+  ValVariant &getValue() noexcept { return Value; }
 
-  /// Getter of value.
-  ValVariant &getValue() { return Value; }
+  /// Setter of value.
+  void setValue(const ValVariant &Val) noexcept { Value = Val; }
 
 private:
   /// \name Data of global instance.
   /// @{
   AST::GlobalType GlobType;
-  ValVariant Value;
+  alignas(16) ValVariant Value;
   /// @}
 };
 
